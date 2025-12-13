@@ -48,7 +48,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
   const prevNode = node.prevNodeId ? nodes.find(n => n.id === node.prevNodeId) : null;
   const nextNode = nodes.find(n => n.prevNodeId === node.id);
   const colors = NODE_COLORS[node.type];
-  const resources = nodes.filter(n => n.type === NodeType.CHARACTER || n.type === NodeType.ITEM);
+  const resources = nodes.filter(n => [NodeType.CHARACTER, NodeType.ITEM, NodeType.LOCATION, NodeType.FACTION].includes(n.type));
   const allowedChildren = HIERARCHY_RULES[node.type];
   const canExpand = allowedChildren && allowedChildren.length > 0;
   
@@ -214,7 +214,8 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
       }
   };
 
-  const isResourceNode = node.type === NodeType.CHARACTER || node.type === NodeType.ITEM;
+  // Correctly identify all resource types including new LOCATION and FACTION
+  const isResourceNode = [NodeType.CHARACTER, NodeType.ITEM, NodeType.LOCATION, NodeType.FACTION].includes(node.type);
 
   return (
     <div className="w-[500px] flex flex-col bg-slate-900 border-l border-slate-800 h-full shadow-2xl z-30">
@@ -318,7 +319,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
                                  if (!res) return null;
                                  return (
                                      <span key={id} className="text-xs bg-slate-800 border border-slate-700 px-2 py-1 rounded-full text-slate-300 flex items-center gap-1">
-                                         <span className={`w-1.5 h-1.5 rounded-full ${res.type === NodeType.CHARACTER ? 'bg-pink-500' : 'bg-indigo-500'}`}></span>
+                                         <span className={`w-1.5 h-1.5 rounded-full ${res.type === NodeType.CHARACTER ? 'bg-pink-500' : (res.type === NodeType.ITEM ? 'bg-indigo-500' : (res.type === NodeType.FACTION ? 'bg-orange-500' : 'bg-teal-500'))}`}></span>
                                          {res.title}
                                          <button onClick={() => toggleAssociation(id)} className="hover:text-red-400 ml-1"><X size={10}/></button>
                                      </span>
@@ -338,7 +339,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
                 )}
 
                 {/* 3. Logic Review */}
-                {!isResourceNode && logicResult && (
+                {!isResourceNode && node.type !== NodeType.ROOT && logicResult && (
                     <div className={`p-3 rounded-lg border text-xs ${logicResult.valid ? 'bg-emerald-900/20 border-emerald-800' : 'bg-red-900/20 border-red-800'}`}>
                         <div className="font-bold mb-1 flex items-center gap-2">
                             {logicResult.valid ? <ShieldCheck size={14}/> : <AlertTriangle size={14}/>}
@@ -354,9 +355,12 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
                 {/* 4. Generation Actions */}
                 {!isResourceNode && (
                     <div className="pt-4 border-t border-slate-800 space-y-4">
-                        <button onClick={handleLogicCheck} className="w-full bg-slate-800 border border-slate-700 py-2 rounded text-xs text-slate-300 hover:bg-slate-700 flex justify-center gap-2">
-                           <ShieldCheck size={14} className="text-amber-500"/> 事件密度与逻辑自检
-                        </button>
+                        {/* Only show logic check for non-ROOT nodes */}
+                        {node.type !== NodeType.ROOT && (
+                            <button onClick={handleLogicCheck} className="w-full bg-slate-800 border border-slate-700 py-2 rounded text-xs text-slate-300 hover:bg-slate-700 flex justify-center gap-2">
+                                <ShieldCheck size={14} className="text-amber-500"/> 事件密度与逻辑自检
+                            </button>
+                        )}
 
                         <div className="grid grid-cols-1 gap-3">
                             {/* Expand Logic */}
@@ -407,11 +411,13 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
                                 <div className="text-center text-xs text-slate-600 py-2 border border-dashed border-slate-800 rounded">已是叶子节点</div>
                             )}
 
-                            {/* Continue Logic */}
-                            <button onClick={handleContinue} className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 py-3 rounded-xl flex items-center justify-center gap-2 text-xs text-slate-300 transition">
-                                {nextNode ? <GitMerge size={16} className="text-amber-500"/> : <ArrowRightCircle size={16} className="text-emerald-500"/>}
-                                {nextNode ? '插入地图过渡节点' : '推进下一事件 (Next)'}
-                            </button>
+                            {/* Continue Logic - Hidden for ROOT */}
+                            {node.type !== NodeType.ROOT && (
+                                <button onClick={handleContinue} className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 py-3 rounded-xl flex items-center justify-center gap-2 text-xs text-slate-300 transition">
+                                    {nextNode ? <GitMerge size={16} className="text-amber-500"/> : <ArrowRightCircle size={16} className="text-emerald-500"/>}
+                                    {nextNode ? '插入地图过渡节点' : '推进下一事件 (Next)'}
+                                </button>
+                            )}
                         </div>
                     </div>
                 )}
