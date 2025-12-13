@@ -2,7 +2,7 @@
 import React, { useState, useRef } from 'react';
 import { NodeData, NodeType, AppSettings, ViewMode } from '../types';
 import { NOVEL_STYLES } from '../constants';
-import { Settings, Users, Package, Plus, Feather, ChevronDown, ChevronRight, Download, Trash2, Key, FileJson, FileText, Upload, Save, FileCode, Map, Flag, Layout, Database } from 'lucide-react';
+import { Settings, Users, Package, Plus, Feather, ChevronDown, ChevronRight, Download, Trash2, Key, FileJson, FileText, Upload, Save, FileCode, Map, Flag, Layout, Database, Sliders, Globe, Cpu, Thermometer } from 'lucide-react';
 
 interface SidebarProps {
   nodes: NodeData[];
@@ -204,7 +204,9 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, settings, viewMode, onViewMode
                 </button>
                 
                 {showSettings && (
-                    <div className="px-4 pb-6 space-y-4 animate-in slide-in-from-bottom-2 duration-200 bg-slate-900 border-b border-slate-800 max-h-[40vh] overflow-y-auto custom-scrollbar">
+                    <div className="px-4 pb-6 space-y-4 animate-in slide-in-from-bottom-2 duration-200 bg-slate-900 border-b border-slate-800 max-h-[50vh] overflow-y-auto custom-scrollbar">
+                        
+                        {/* 1. API Basic */}
                         <div>
                             <label className="text-[10px] text-slate-500 uppercase block mb-1.5 font-semibold flex items-center gap-1"><Key size={10}/> API Key</label>
                                 <input 
@@ -215,7 +217,60 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, settings, viewMode, onViewMode
                                     className="w-full bg-slate-800 border border-slate-700 rounded text-xs text-slate-300 p-2 focus:border-blue-500 focus:outline-none placeholder-slate-600 font-mono"
                                 />
                         </div>
+
+                         {/* 2. Model Settings */}
+                         <div className="bg-black/20 p-2 rounded border border-slate-800 space-y-3">
+                             <div>
+                                <label className="text-[10px] text-slate-500 uppercase block mb-1.5 font-semibold flex items-center gap-1"><Cpu size={10}/> Model Name</label>
+                                <input 
+                                    type="text" 
+                                    value={settings.modelName}
+                                    onChange={(e) => onSettingsChange({...settings, modelName: e.target.value})}
+                                    placeholder="gemini-2.5-flash"
+                                    className="w-full bg-slate-800 border border-slate-700 rounded text-xs text-slate-300 p-2 focus:border-blue-500 focus:outline-none placeholder-slate-600 font-mono"
+                                />
+                             </div>
+
+                             <div>
+                                <label className="text-[10px] text-slate-500 uppercase block mb-1.5 font-semibold flex items-center gap-1"><Globe size={10}/> Base URL</label>
+                                <input 
+                                    type="text" 
+                                    value={settings.baseUrl}
+                                    onChange={(e) => onSettingsChange({...settings, baseUrl: e.target.value})}
+                                    placeholder="https://generativelanguage.googleapis.com"
+                                    className="w-full bg-slate-800 border border-slate-700 rounded text-xs text-slate-300 p-2 focus:border-blue-500 focus:outline-none placeholder-slate-600 font-mono"
+                                />
+                             </div>
+
+                             <div>
+                                <div className="flex justify-between items-center mb-1">
+                                    <label className="text-[10px] text-slate-500 uppercase font-semibold flex items-center gap-1"><Thermometer size={10}/> Temperature</label>
+                                    <span className="text-[10px] text-slate-400 font-mono">{settings.temperature}</span>
+                                </div>
+                                <input 
+                                    type="range" 
+                                    min="0" max="2" step="0.1"
+                                    value={settings.temperature}
+                                    onChange={(e) => onSettingsChange({...settings, temperature: parseFloat(e.target.value)})}
+                                    className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer"
+                                />
+                             </div>
+                             
+                             <div>
+                                <label className="text-[10px] text-slate-500 uppercase block mb-1.5 font-semibold flex items-center gap-1">Thinking Budget (Tokens)</label>
+                                <input 
+                                    type="number"
+                                    min="0"
+                                    step="1024"
+                                    value={settings.thinkingBudget}
+                                    onChange={(e) => onSettingsChange({...settings, thinkingBudget: parseInt(e.target.value) || 0})}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded text-xs text-slate-300 p-2 focus:border-blue-500 focus:outline-none placeholder-slate-600 font-mono"
+                                />
+                                <p className="text-[9px] text-slate-600 mt-1">设为 0 以禁用 Thinking。建议 Gemini 2.5 系列开启。</p>
+                             </div>
+                         </div>
                         
+                        {/* 3. System Instruction */}
                         <div>
                             <label className="text-[10px] text-slate-500 uppercase block mb-1.5 font-semibold flex items-center gap-1"><FileCode size={10}/> System Instruction</label>
                             <textarea 
