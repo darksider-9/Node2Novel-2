@@ -77,30 +77,45 @@ export class AutoDraftAgent {
         return clean.trim();
     }
 
-    // --- QUALITY GATE (HARD METRICS) ---
-    private async qualityGate(nodeId: string, minLength: number): Promise<boolean> {
+    // --- QUALITY GATE / EXPANSION PHASE ---
+    // This is run LAST to ensure word count metrics are met after logic and refinement are done.
+    private async expansionPhase(nodeId: string, minLength: number): Promise<boolean> {
         const node = this.getNodes().find(n => n.id === nodeId);
         if (!node) return false;
         
         // Use summary for Outline/Plot, content for Chapter
         const textToCheck = node.type === NodeType.CHAPTER ? (node.content || "") : node.summary;
         
-        if (textToCheck.length < minLength) {
-            this.log(`[质量门禁] 节点 ${node.title} 字数不足 (${textToCheck.length} < ${minLength})。自动触发扩写...`);
-            
-            // Auto-Refine to expand
-            const instruction = `当前字数仅 ${textToCheck.length}，远低于要求的 ${minLength}。请务必大幅扩充细节，补充环境、心理、动作描写，确保字数达标。`;
-            const expandedText = await refineContent(textToCheck, instruction, this.settings);
-            const sanitized = this.sanitizeContent(expandedText);
-            
-            this.updateNode(nodeId, { 
-                summary: node.type !== NodeType.CHAPTER ? sanitized : node.summary,
-                content: node.type === NodeType.CHAPTER ? sanitized : sanitized // Sync content for outline types too
-            });
-            
-            return sanitized.length >= minLength; // Check again
+        // If already meets target, skip
+        if (textToCheck.length >= minLength) {
+             this.log(`[扩写] 节点 ${node.title} 字数已达标 (${textToCheck.length})，无需扩写。`);
+             return true;
         }
-        return true;
+
+        this.log(`[扩写] 节点 ${node.title} 进入扩充阶段 (当前: ${textToCheck.length} -> 目标: ${minLength})...`);
+        
+        // Auto-Refine to expand
+        const instruction = `【扩充任务】
+        当前内容字数：${textToCheck.length}字。
+        目标字数：${minLength}字以上。
+        
+        请保留当前所有的事件脉络、逻辑和设定，对其进行大幅度的【细节填充】：
+        1. 展开所有的简略描述。例如将“发生了一场激战”扩写为具体的招式拆解。
+        2. 补充环境氛围描写、人物心理活动、对话神态。
+        3. 确保信息密度不降低的前提下，增加篇幅。
+        
+        请直接输出扩充后的完整内容。`;
+
+        const expandedText = await refineContent(textToCheck, instruction, this.settings);
+        const sanitized = this.sanitizeContent(expandedText);
+        
+        this.updateNode(nodeId, { 
+            summary: node.type !== NodeType.CHAPTER ? sanitized : node.summary,
+            content: node.type === NodeType.CHAPTER ? sanitized : sanitized // Sync content for outline types too
+        });
+        
+        this.log(`[扩写] 完成，当前字数: ${sanitized.length}`);
+        return sanitized.length >= minLength;
     }
 
     public async start(rootNodeId: string) {
@@ -110,20 +125,27 @@ export class AutoDraftAgent {
         try {
             // 1. Refine Root (Worldview)
             this.log(`正在优化世界观设定...`);
-            await this.refineNodeStepByStep(rootNodeId, `融入元素：${this.config.idea}。丰富主线设定，明确结局。`);
+            await delay(500);
+            
+            // Generate basic refinement
+            await this.refineNodeStepByStep(rootNodeId, `
+                【重要】这是世界观设定。请融入用户的新创意："${this.config.idea}"。
+                要求：保持 markdown 格式，丰富细节，包含核心势力和等级体系。
+            `);
             await delay(1000);
 
             // 2. Generate Volumes (Outline)
             this.log(`正在生成 ${this.config.volumeCount} 卷大纲...`);
             const volumeIds = await this.generateChildrenSequence(rootNodeId, NodeType.OUTLINE, this.config.volumeCount, { volumeIndex: 1 });
             
-            // Loop check (max 2 times) happens inside batchCheckAndFix
+            // Logic Check First
             await this.batchCheckAndFix(volumeIds, rootNodeId);
-            
-            // HARD METRIC CHECK FOR OUTLINES (>2000)
-            for (const volId of volumeIds) await this.qualityGate(volId, 2000);
 
+            // Refine (Prompt Optimization + Rewrite)
             await this.batchRefine(volumeIds, "优化分卷结构，确保每卷都有明确的主题和高潮，包含地图跨越。");
+            
+            // EXPANSION PHASE (>2000) - Done LAST
+            for (const volId of volumeIds) await this.expansionPhase(volId, 2000);
 
             // 3. Drill Down to Plots
             for (let i = 0; i < volumeIds.length; i++) {
@@ -131,23 +153,19 @@ export class AutoDraftAgent {
                 const volId = volumeIds[i];
                 this.log(`正在处理第 ${i+1}/${volumeIds.length} 卷剧情点...`);
                 
-                // Use user config for Plot count
+                // Generate
                 const plotIds = await this.generateChildrenSequence(volId, NodeType.PLOT, this.config.plotPointsPerVolume, { volumeIndex: i + 1 });
                 
+                // Logic Check
                 await this.batchCheckAndFix(plotIds, volId);
                 
-                // HARD METRIC CHECK FOR PLOTS (>2000)
-                // This is critical: Plots must contain ALL info (Entities, Items) for the chapters
-                for (const plotId of plotIds) await this.qualityGate(plotId, 2000);
-                
+                // Refine
                 await this.batchRefine(plotIds, "强化因果逻辑，增加冲突和反转。必须包含所有新人物、新物品的设定细节。");
-                await delay(1000);
 
-                // --- NEW: Bottom-Up Consistency Check ---
-                // After Plots are solidified, we update the Volume Outline to reflect the detailed plots
-                // This is a simplified consistency check
-                // this.log(`[一致性] 正在根据生成的剧情点反向修正分卷大纲...`);
-                // (Implementation omitted for brevity, but logically belongs here)
+                // EXPANSION PHASE (>2000)
+                for (const plotId of plotIds) await this.expansionPhase(plotId, 2000);
+
+                await delay(1000);
 
                 // 4. Drill Down to Chapters
                 for (let j = 0; j < plotIds.length; j++) {
@@ -155,29 +173,22 @@ export class AutoDraftAgent {
                      const plotId = plotIds[j];
                      this.log(`>> 正在拆分第 ${j+1}/${plotIds.length} 个剧情点的章节...`);
 
-                     // Calculate Chapter Indices
                      const startChapterIndex = this.globalChapterCounter + 1;
                      
-                     // Use user config for Chapter count
+                     // Generate Chapter Outlines (Summary only)
                      const chapIds = await this.generateChildrenSequence(plotId, NodeType.CHAPTER, this.config.chaptersPerPlot, { 
                          volumeIndex: i + 1, 
                          plotIndex: j + 1,
                          globalChapterIndex: startChapterIndex
                      });
                      
-                     // Increase Global Counter
                      this.globalChapterCounter += chapIds.length;
 
+                     // Logic Check
                      await this.batchCheckAndFix(chapIds, plotId);
                      
-                     // HARD METRIC CHECK FOR CHAPTER OUTLINES (>500)
-                     for (const cId of chapIds) {
-                         const node = this.getNodes().find(n => n.id === cId);
-                         if (node && node.summary.length < 500) {
-                             const expanded = await refineContent(node.summary, "扩充章节细纲至500字以上，补充事件细节。", this.settings);
-                             this.updateNode(cId, { summary: this.sanitizeContent(expanded) });
-                         }
-                     }
+                     // EXPANSION PHASE for Chapter Outlines (>500)
+                     for (const cId of chapIds) await this.expansionPhase(cId, 500);
                      
                      await delay(1000);
 
@@ -186,14 +197,12 @@ export class AutoDraftAgent {
                          if (this.stopSignal) break;
                          const chapId = chapIds[k];
                          
-                         // Check if content already exists to skip
                          const chapterNode = this.getNodes().find(n => n.id === chapId);
                          if (chapterNode && chapterNode.content && chapterNode.content.length > 500) {
                              this.log(`[跳过] 章节 ${chapterNode.title} 已有正文。`);
                              continue;
                          }
 
-                         // Pass Context: Global Chapter Index
                          await this.writeChapterProse(chapId, {
                              volumeIndex: i + 1,
                              plotIndex: j + 1,
@@ -201,8 +210,8 @@ export class AutoDraftAgent {
                              globalChapterIndex: startChapterIndex + k
                          });
                          
-                         // HARD METRIC CHECK FOR PROSE (>2000)
-                         await this.qualityGate(chapId, 2000);
+                         // EXPANSION PHASE for Prose (>2000)
+                         await this.expansionPhase(chapId, 2000);
                          
                          await delay(2000); 
                      }
@@ -224,7 +233,7 @@ export class AutoDraftAgent {
         }
     }
 
-    // --- Helper: Generate Sequence ---
+    // --- Helper: Generate Sequence (SEQUENTIAL MODE) ---
     private async generateChildrenSequence(
         parentId: string, 
         type: NodeType, 
@@ -234,78 +243,75 @@ export class AutoDraftAgent {
         const parent = this.getNodes().find(n => n.id === parentId);
         if (!parent) return [];
 
-        // --- IDEMPOTENCY CHECK ---
         const existingChildren = this.getNodes().filter(n => parent.childrenIds.includes(n.id) && n.type === type);
-        
-        if (existingChildren.length >= count) {
-            this.log(`[跳过] 节点 ${parent.title} 已存在 ${existingChildren.length} 个 ${type} 子节点 (目标 ${count})。`);
-            return existingChildren.slice(0, count).map(n => n.id);
-        }
-        
         let createdIds: string[] = existingChildren.map(n => n.id);
-        const needed = count - existingChildren.length;
         
-        if (existingChildren.length > 0) {
-            this.log(`[恢复] 节点 ${parent.title} 已有 ${existingChildren.length} 个 ${type}，需补全 ${needed} 个...`);
+        if (createdIds.length >= count) {
+            return createdIds.slice(0, count);
         }
+        
+        this.log(`[序列生成] 开始生成 ${type} 节点 (目标: ${count})，采用单线程模式防崩...`);
 
-        const milestoneConfig: MilestoneConfig | undefined = type === NodeType.PLOT ? {
-             totalPoints: count, 
-             generateCount: Math.min(needed, 5) 
-        } : (type === NodeType.OUTLINE ? {
-             totalPoints: count, 
-             generateCount: count 
-        } : undefined);
+        // Force Sequential Generation: Loop `count - existing` times
+        const needed = count - createdIds.length;
 
-        const expansionConfig: ExpansionConfig | undefined = type === NodeType.CHAPTER ? {
-            chapterCount: count, 
-            wordCount: `${this.config.wordCountPerChapter}`
-        } : undefined;
+        for (let i = 0; i < needed; i++) {
+            if (this.stopSignal) break;
+            
+            const isFirst = createdIds.length === 0;
+            const lastId = createdIds.length > 0 ? createdIds[createdIds.length - 1] : null;
+            const lastNode = lastId ? this.getNodes().find(n => n.id === lastId) : undefined;
+            
+            this.log(`[生成] 正在请求第 ${createdIds.length + 1}/${count} 个 ${type} 节点...`);
 
-        // 1. Initial Generation
-        if (createdIds.length === 0) {
-            this.log(`[生成] 正在初始化 ${type} 序列 (目标: ${count})...`);
-            const initialNodes = await generateNodeExpansion({
-                currentNode: parent,
-                globalContext: this.getContext(parent),
-                settings: this.settings,
-                task: 'EXPAND',
-                milestoneConfig,
-                expansionConfig,
-                structuralContext: context // Pass Context
-            });
+            // Always request ONE at a time to maximize token usage per node
+            const milestoneConfig: MilestoneConfig | undefined = type === NodeType.PLOT ? {
+                 totalPoints: count, 
+                 generateCount: 1  // FORCE 1
+            } : (type === NodeType.OUTLINE ? {
+                 totalPoints: count, 
+                 generateCount: 1  // FORCE 1
+            } : undefined);
+    
+            const expansionConfig: ExpansionConfig | undefined = type === NodeType.CHAPTER ? {
+                chapterCount: 1, // FORCE 1
+                wordCount: `${this.config.wordCountPerChapter}`
+            } : undefined;
 
-            if (initialNodes.length > 0) {
-                const addedIds = this.addNodesToState(parentId, initialNodes);
-                createdIds.push(...addedIds);
+            let nextNodes: Partial<NodeData>[] = [];
+            
+            // Retry logic for network flakiness
+            let retries = 0;
+            while(retries < 3) {
+                try {
+                    nextNodes = await generateNodeExpansion({
+                         currentNode: isFirst ? parent : (lastNode || parent),
+                         parentContext: isFirst ? undefined : parent, // If continue, parent is context
+                         prevContext: lastNode, // Chain link
+                         globalContext: this.getContext(parent),
+                         settings: this.settings,
+                         task: isFirst ? 'EXPAND' : 'CONTINUE', // First one expands parent, subsequent continues chain
+                         milestoneConfig,
+                         expansionConfig,
+                         structuralContext: context
+                     });
+                     if (nextNodes.length > 0) break;
+                } catch (e) {
+                    console.error(`Gen error, retry ${retries}`, e);
+                }
+                retries++;
+                await delay(2000);
             }
-            await delay(1000);
-        }
 
-        // 2. Loop "Continue"
-        while (createdIds.length < count && !this.stopSignal) {
-             const lastId = createdIds[createdIds.length - 1];
-             const lastNode = this.getNodes().find(n => n.id === lastId);
-             if (!lastNode) break;
-
-             this.log(`[生成] 正在推进 ${type} 序列 (${createdIds.length}/${count})...`);
-             
-             const nextNodes = await generateNodeExpansion({
-                 currentNode: lastNode,
-                 prevContext: lastNode,
-                 globalContext: this.getContext(parent),
-                 settings: this.settings,
-                 task: 'CONTINUE',
-                 structuralContext: context // Pass Context
-             });
-
-             if (nextNodes.length > 0) {
-                 const addedIds = this.addNodesToState(parentId, nextNodes, lastId);
+            if (nextNodes.length > 0) {
+                 // Even if multiple returned (unlikely with count=1), take all
+                 const addedIds = this.addNodesToState(parentId, nextNodes, lastId || undefined);
                  createdIds.push(...addedIds);
-             } else {
-                 break; 
-             }
-             await delay(1000);
+            } else {
+                 this.log(`[错误] 生成失败，跳过该节点。`);
+            }
+            
+            await delay(1000); // Rate limit padding
         }
         
         return createdIds;
@@ -428,7 +434,7 @@ export class AutoDraftAgent {
         const nodes = this.getNodes();
         const root = nodes.find(n => n.type === NodeType.ROOT);
         const resources = nodes.filter(n => [NodeType.CHARACTER, NodeType.ITEM, NodeType.LOCATION, NodeType.FACTION].includes(n.type));
-        return `【世界观】${root?.content.slice(0, 1000)}\n【资源库】${resources.map(r => r.title + ':' + r.summary).join('\n')}`;
+        return `【世界观】${root?.content.slice(0, 1500)}\n【资源库】${resources.map(r => r.title + ':' + r.summary.slice(0, 100)).join('\n')}`;
     }
 
     private addNodesToState(parentId: string, newNodesData: Partial<NodeData>[], afterNodeId?: string): string[] {

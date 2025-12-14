@@ -103,7 +103,7 @@ export const generateInitialWorldview = async (title: string, settings: AppSetti
         输出要求：
         - 结构清晰，使用 Markdown 格式。
         - 既然是${settings.novelStyle}，请确保术语地道（例如修仙要有灵根、丹田；赛博要有义体、公司）。
-        - 字数控制在 500-800 字之间。
+        - 字数控制在 800-1500 字之间。越详细越好。
     `;
 
     const messages = [
@@ -192,17 +192,15 @@ export const batchValidateNodes = async (
 
     if (nodeType === NodeType.OUTLINE) {
         strictRules = `
-        **[分卷大纲 (OUTLINE) 严格审查标准]**
-        1. **字数达标**：每个 Outline 的 Summary 必须超过 2000 字（包含详尽的地图流转和事件推演）。内容过短视为【严重违规】。
-        2. **地图跨越**：必须明确描述至少 1 次大的【地区/地图跨越】（如从新手村到主城）。
-        3. **格式规范**：严禁出现子标题（如 "1. 起因"），必须是连贯的叙事文本。
+        **[分卷大纲 (OUTLINE) 审查标准]**
+        1. **地图跨越**：必须明确描述至少 1 次大的【地区/地图跨越】（如从新手村到主城）。
+        2. **格式规范**：必须是连贯的叙事文本。
         `;
     } else if (nodeType === NodeType.PLOT) {
         strictRules = `
-        **[剧情详纲 (PLOT) 严格审查标准]**
-        1. **字数达标**：每个 Plot 的 Summary 必须超过 2000 字。
-        2. **信息完备**：必须包含该剧情段落内出现的所有【新人物】、【新物品】、【新能力】、【新地图】的具体设定。不能只写“主角获得了一个宝物”，必须写明“主角获得了【青冥剑】，属性是...”。
-        3. **事件密度**：必须包含支撑 3-5 章正文的高密度事件量。
+        **[剧情详纲 (PLOT) 审查标准]**
+        1. **信息完备**：必须包含该剧情段落内出现的【新人物】、【新物品】、【新地图】的具体设定。
+        2. **事件密度**：必须包含支撑 3-5 章正文的事件量。
         `;
     }
 
@@ -222,17 +220,15 @@ export const batchValidateNodes = async (
         
         ${strictRules}
         
-        请进行严格审查，寻找以下问题：
+        请进行审查，寻找以下问题：
         1. **逻辑断层**：前一个节点的结局是否自然引发下一个节点的开端？
-        2. **内容质量**：是否满足上述严格审查标准？
-           - 如果字数严重不足，指令应为：“扩充内容至2000字以上，补充XXX细节”。
-           - 如果缺少地图跨越，指令应为：“增加地图转换情节”。
+        2. **内容质量**：是否缺少关键信息（如地图跨越、新人物设定）？
         3. **设定冲突**：是否与上级大纲或全局设定矛盾？
         
         **输出要求**：
-        - 只有发现明显问题时才生成修复指令。
+        - 只有发现明显逻辑硬伤或关键缺失时才生成修复指令。
         - **Fix Instruction (指令)**：必须是针对性的修改建议。
-        - 如果该节点问题不大，不需要修复，则不要列在返回列表中。
+        - 如果该节点逻辑通顺，只是字数较少，**不要**在此处报错（后续会有专门的扩写步骤）。
 
         **Output JSON Format Required:**
         { 
@@ -253,7 +249,7 @@ export const batchValidateNodes = async (
 };
 
 export const applyLogicFixes = async (node: NodeData, instruction: string, settings: AppSettings): Promise<string> => {
-    return await refineContent(node.summary, `【逻辑修复请求】\n针对问题：${instruction}\n请微调当前摘要以修复此逻辑问题。注意：如果是字数不足，请务必大幅扩充细节。保留原有的核心事件，仅修改有问题的地方。如果是删除助手语，请直接输出纯净的内容。`, settings);
+    return await refineContent(node.summary, `【逻辑修复请求】\n针对问题：${instruction}\n请微调当前摘要以修复此逻辑问题。保留原有的核心事件，仅修改有问题的地方。`, settings);
 };
 
 // --- 3. Node Expansion (The Core) ---
@@ -274,6 +270,9 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
       }
   }
 
+  // Check if we are generating a single item or multiple
+  const isSingleGeneration = (milestoneConfig?.generateCount === 1) || (expansionConfig?.chapterCount === 1);
+
   // --- Construct Position Context String ---
   let positionInfo = "";
   if (structuralContext) {
@@ -293,18 +292,19 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
       // CASE 1: ROOT -> OUTLINE
       if (currentNode.type === NodeType.ROOT) {
            const count = milestoneConfig?.generateCount || 3;
+           const isSequential = count === 1;
            taskPrompt = `
              任务：【全书分卷规划】 (Volume Outline Generation)
              当前书名：${currentNode.title}
              【世界观与主线设定 (Bible)】：
              ${currentNode.content} 
              
-             目标：依据世界观中的【主线宏愿】，推演小说的前 ${count} 个“分卷 (OUTLINE)”。
+             目标：推演${isSequential ? '接下来的 1 个' : `前 ${count} 个`}“分卷 (OUTLINE)”。
              
-             **核心硬指标（必须严格执行）：**
-             1. **字数要求**：每个 Summary 必须 **超过 2000 字**。这是一份详尽的剧情推演，不是简介！
-             2. **地图流转**：每一卷必须包含明确的【地区跨越】（例如：从新手村 -> 县城 -> 宗门）。
-             3. **格式规范**：Title 必须是 "第一卷：[卷名]" 的格式。Summary 内部 **严禁使用 Markdown 标题 (##)**，必须是连贯的段落叙述。
+             **初始生成要求：**
+             1. **结构优先**：请重点构建故事骨架，字数在 500-800 字左右即可，不需要过度展开细节。
+             2. **内容连贯性**：请输出连贯的故事摘要，不要使用列表项（1. 2. 3.）。就像在讲一个完整的故事概梗。
+             3. **地图流转**：每一卷必须包含明确的【地区跨越】（例如：从新手村 -> 县城 -> 宗门）。
              4. **叙事结构**：必须包含完整的 起（卷首危机）-> 承（换地图/升级）-> 转（遭遇宿敌/发现阴谋）-> 合（卷末大战/伏笔）。
            `;
       } 
@@ -312,6 +312,7 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
       else if (currentNode.type === NodeType.OUTLINE) {
            const total = milestoneConfig?.totalPoints || 10;
            const count = milestoneConfig?.generateCount || 5;
+           const isSequential = count === 1;
            
            taskPrompt = `
              任务：【细化剧情详纲 (Detailed Plot Outline)】
@@ -320,11 +321,11 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
              【分卷大纲】：
              ${currentNode.content}
              
-             本卷总计约 ${total} 个剧情点。请为我生成接下来的 ${count} 个关键【剧情详纲节点 (PLOT)】。
+             本卷总计约 ${total} 个剧情点。请为我生成${isSequential ? '接下来的 1 个' : `接下来的 ${count} 个`}关键【剧情详纲节点 (PLOT)】。
              
-             **核心硬指标（必须严格执行）：**
-             1. **字数要求**：每个 PLOT 的 Summary 必须 **超过 2000 字**。
-             2. **信息完备性**：必须包含该阶段所有【新人物】、【新物品】、【新功法】、【新地图】的具体设定。不要只说“获得了宝物”，要写出“获得了[玄天镜]，功能是照妖”。
+             **初始生成要求：**
+             1. **结构优先**：重点是把事件发生的因果逻辑写清楚，字数在 500-800 字左右即可。
+             2. **关键要素**：列出该阶段出现的【新人物】、【新物品】、【新地图】。
              3. **事件支撑**：每个 PLOT 节点必须包含能支撑 3-5 章正文的高密度事件量。
              4. **格式**：Summary 必须采用【节拍器】格式撰写，包含：【核心冲突】、【关键交互】、【详细事件推演】。
            `;
@@ -333,6 +334,7 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
       else if (currentNode.type === NodeType.PLOT) {
           const count = expansionConfig?.chapterCount || 3;
           const words = expansionConfig?.wordCount || '3000';
+          const isSequential = count === 1;
           
           taskPrompt = `
             任务：【章节拆分与事件排布】
@@ -344,15 +346,15 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
             **核心前提：**
             该 PLOT 节点是一个剧情单元，现在需要将其落实为具体的章节 (CHAPTER)。
             
-            目标：将上述详纲拆分为 ${count} 个具体的“章节”。
+            目标：将上述详纲拆分为 ${isSequential ? '接下来的 1 个' : `接下来的 ${count} 个`}具体的“章节”。
             
-            **核心要求（三事件原则）：**
-            1. **细纲字数**：每个 Chapter 的 Summary (细纲) 必须 **超过 500 字**，信息量必须充足。
+            **初始生成要求：**
+            1. **细纲设计**：每个 Chapter 的 Summary (细纲) 字数在 300-500 字左右即可。
             2. **事件密度**：每一章必须包含至少 3 个完整事件。
             3. **逻辑连贯**：上一章的结尾必须自然衔接下一章的开头。
             4. **Context Aware**：请注意当前是全书第 ${structuralContext?.globalChapterIndex || '?'} 章，请根据进度调整节奏。
             
-            每章预期正文字数：${words} 字。
+            每章预期正文字数：${words} 字（注：正文撰写在后续步骤，此处仅生成细纲）。
           `;
       }
   } else if (task === 'CONTINUE') {
@@ -370,6 +372,8 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
 
     **Output JSON Format Required:**
     [ { "title": "string", "summary": "string" } ]
+    
+    IMPORTANT: Return a JSON Array with exactly ${isSingleGeneration ? '1' : 'requested count'} items.
   `;
 
   try {
@@ -431,11 +435,11 @@ export const generateChapterContent = async (params: AIRequestParams): Promise<s
       2. **对话驱动**：全章 60% 以上篇幅必须是对话。通过对话推动剧情。
       3. **极简环境描写**：全章最多只能出现 1 句环境描写，且必须一笔带过。
       4. **【最高优先级】禁止预示性结尾**：严禁在结尾写“他不知道的是...”、“这仅仅是开始...”等。
-      5. **【最高优先级】字数要求**：必须输出 **2000字以上** 的正文。如果不达标，将被视为任务失败。
       
       输出要求：
       - Markdown 格式。
       - 直接开始正文，不需要写标题。
+      - 尽量写长，目标 2000 字以上。
     `;
 
     return await callOpenAI([
@@ -515,6 +519,16 @@ export const generateRefinementPrompt = async (
         2. 确保【事件链】的紧凑性（起因->行动->结果）。
         3. 增加“期待感”和“爽点”的设计。
         `;
+    }
+    
+    // ROOT special handling
+    if (nodeType === NodeType.ROOT) {
+         specificGuidelines = `
+         针对【世界观 (ROOT)】层级的特殊要求：
+         1. 这是一个"Expansion"任务。你需要把简略的设定扩写得非常详细。
+         2. 不要概括，要具体。例如不要只写“有三大宗门”，要写出每个宗门的名字、特色、功法。
+         3. 必须保留 Markdown 格式。
+         `;
     }
 
     const prompt = `
