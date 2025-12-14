@@ -60,7 +60,7 @@ export interface AIRequestParams {
   globalContext: string; // Plain text context of associated items
   storyContext?: string; // New: Rolling summary of previous chapters
   settings: AppSettings;
-  task: 'EXPAND' | 'WRITE' | 'BRAINSTORM' | 'CONTINUE' | 'POLISH' | 'SYNC_LORE';
+  task: 'EXPAND' | 'WRITE' | 'BRAINSTORM' | 'CONTINUE' | 'POLISH' | 'SYNC_LORE' | 'BATCH_CHECK' | 'BATCH_FIX';
   
   // User defined configs for Plot -> Chapter breakdown
   expansionConfig?: ExpansionConfig;
@@ -70,6 +70,9 @@ export interface AIRequestParams {
   
   // For Polish task
   selection?: string;
+  
+  // For Batch tasks
+  batchNodes?: NodeData[];
 }
 
 export interface LogicValidationResult {
@@ -99,4 +102,20 @@ export interface WorldStateAnalysis {
         changeLog: string;
     }[];
     mentionedIds: string[];
+}
+
+// --- AUTO DRAFT TYPES ---
+export interface AutoDraftConfig {
+    idea: string; // Core user idea/elements
+    volumeCount: number;
+    plotPointsPerVolume: number;
+    chaptersPerPlot: number;
+    wordCountPerChapter: number;
+}
+
+export interface AutoDraftStatus {
+    isActive: boolean;
+    currentStage: string; // e.g., "正在架构第一卷..."
+    progress: number; // 0-100
+    logs: string[];
 }

@@ -1,6 +1,28 @@
-
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
 import { AIRequestParams, NodeType, NodeData, LogicValidationResult, LoreUpdateSuggestion, AppSettings, WorldStateAnalysis } from '../types';
+
+// Helper: Delay
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Helper: Retry Wrapper
+const callAIWithRetry = async <T>(fn: () => Promise<T>, retries = 3): Promise<T> => {
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await fn();
+        } catch (error: any) {
+            const msg = error?.message || '';
+            // Check for 429 or 503 (Service Unavailable)
+            if (msg.includes('429') || msg.includes('503') || error?.status === 429 || error?.code === 429) {
+                const waitTime = 2000 * (2 ** i); // 2s, 4s, 8s
+                console.warn(`[Gemini API] Rate limit hit. Retrying in ${waitTime/1000}s...`);
+                await delay(waitTime);
+                continue;
+            }
+            throw error;
+        }
+    }
+    throw new Error("API Request Failed after max retries. Please check quota.");
+};
 
 // Helper: Prioritize User Key -> Env Key
 const createAI = (settings: AppSettings) => {
@@ -51,7 +73,7 @@ export const generateInitialWorldview = async (title: string, settings: AppSetti
     `;
 
     try {
-        const response = await ai.models.generateContent({
+        const response = await callAIWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
             model: settings.modelName,
             contents: prompt,
             config: {
@@ -60,7 +82,7 @@ export const generateInitialWorldview = async (title: string, settings: AppSetti
                 // Worldview creation benefits heavily from thinking
                 ...getThinkingConfig(settings, true) 
             }
-        });
+        }));
         return response.text || "世界观生成失败，请手动输入...";
     } catch (e) {
         console.error("Init Worldview Error", e);
@@ -88,10 +110,10 @@ export const optimizeSystemInstruction = async (title: string, style: string, cu
     `;
 
     try {
-        const response = await ai.models.generateContent({
+        const response = await callAIWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
             model: settings.modelName,
             contents: prompt,
-        });
+        }));
         return response.text || currentInstruction;
     } catch (e) {
         console.error("Optimize Prompt Error", e);
@@ -122,7 +144,7 @@ export const validateStoryLogic = async (params: AIRequestParams): Promise<Logic
     `;
 
     try {
-        const response = await ai.models.generateContent({
+        const response = await callAIWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
             model: settings.modelName,
             contents: prompt,
             config: {
@@ -139,12 +161,93 @@ export const validateStoryLogic = async (params: AIRequestParams): Promise<Logic
                 },
                 ...getThinkingConfig(settings, true)
             }
-        });
+        }));
         if (response.text) return JSON.parse(response.text);
         throw new Error("Empty response");
     } catch (error) {
         return { valid: false, score: 0, issues: ["API Error"], suggestions: [] };
     }
+};
+
+// --- NEW: Batch Logic Validation (Context Aware & Targeted) ---
+export const batchValidateNodes = async (
+    nodesToCheck: NodeData[],
+    parent: NodeData,
+    globalContext: string,
+    settings: AppSettings
+): Promise<{ hasConflicts: boolean; fixes: { id: string; instruction: string }[] }> => {
+    const ai = createAI(settings);
+    
+    // Include both Title and Summary/Content for analysis
+    const nodesText = nodesToCheck.map((n, i) => 
+        `[ID: ${n.id}] [Type: ${n.type}]\nTITLE: ${n.title}\nCONTENT: ${n.summary}`
+    ).join('\n----------------\n');
+
+    const prompt = `
+        角色：【逻辑精修师】
+        任务：检查以下一组连续剧情节点的逻辑连贯性与质量。
+        
+        【全局设定】：${globalContext}
+        【上级大纲 (Parent)】：${parent.title} - ${parent.summary}
+        
+        【待检查的节点链 (Batch)】：
+        ${nodesText}
+        
+        请进行严格审查，寻找以下问题：
+        1. **逻辑断层**：前一个节点的结局是否自然引发下一个节点的开端？
+        2. **内容质量**：
+           - **[OUTLINE 层级]**：内容是否足够丰富？是否包含了完整的【地图流转】（从A地去B地）和【核心冲突】？如果只是简短的一句话（如“主角去修炼”），视为【内容贫乏】，必须修复。
+           - **[Meta 文本检测]**：内容是否包含了“好的，这是大纲”、“以下是生成的剧情”等 AI 助手语？必须删除。
+           - **[OUTLINE 格式]**：标题必须是“第一卷：xxx”格式。
+        3. **设定冲突**：是否与上级大纲或全局设定矛盾？
+        
+        **输出要求**：
+        - 只有发现明显问题时才生成修复指令。
+        - **Fix Instruction (指令)**：必须是针对性的修改建议。
+          - 针对 Meta 文本：指令应为“删除助手回复语，只保留故事大纲”。
+          - 针对内容贫乏：指令应为“扩充本卷大纲，补充具体的地图路线、反派名称和高潮战役的细节，字数扩充至 300 字以上”。
+        - 如果该节点问题不大，不需要修复，则不要列在返回列表中。
+
+        返回 JSON: { hasConflicts: boolean, fixes: [{ id: string, instruction: string }] }
+    `;
+
+    try {
+         const response = await callAIWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
+            model: settings.modelName,
+            contents: prompt,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        hasConflicts: { type: Type.BOOLEAN },
+                        fixes: { 
+                            type: Type.ARRAY, 
+                            items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                    id: { type: Type.STRING },
+                                    instruction: { type: Type.STRING }
+                                }
+                            }
+                        }
+                    }
+                },
+                ...getThinkingConfig(settings, true)
+            }
+        }));
+        if (response.text) return JSON.parse(response.text);
+        return { hasConflicts: false, fixes: [] };
+    } catch(e) {
+        console.error("Batch Validate Error", e);
+        return { hasConflicts: false, fixes: [] };
+    }
+};
+
+// --- NEW: Apply Logic Fixes ---
+export const applyLogicFixes = async (node: NodeData, instruction: string, settings: AppSettings): Promise<string> => {
+    // We use refineContent here, but explicit prompt to ensure we fix logic while keeping context
+    return await refineContent(node.summary, `【逻辑修复请求】\n针对问题：${instruction}\n请微调当前摘要以修复此逻辑问题。请保留原有的核心事件，仅修改有问题的地方。如果是删除助手语，请直接输出纯净的内容。`, settings);
 };
 
 // 2. Node Expansion (Strict Hierarchy & Logic)
@@ -170,40 +273,50 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
   if (task === 'EXPAND') {
       // CASE 1: ROOT -> OUTLINE (Worldview -> Volumes/Grand Dungeons)
       if (currentNode.type === NodeType.ROOT) {
+           const count = milestoneConfig?.generateCount || 3;
            taskPrompt = `
-             任务：【全书分卷剧情推演】
+             任务：【全书分卷规划】 (Volume Outline Generation)
              当前书名：${currentNode.title}
              【世界观与主线设定 (Bible)】：
              ${currentNode.content} 
              
-             目标：依据世界观中的【主线宏愿】，推演小说的前 3-5 个“分卷 (OUTLINE)”。
+             目标：依据世界观中的【主线宏愿】，推演小说的前 ${count} 个“分卷 (OUTLINE)”。
              
-             **核心要求（事件驱动的大纲）：**
-             1. **严禁静态描述**：不要写“主角变得很强”或“登上王座”这种状态。
-             2. **必须基于事件链**：Summary 必须包含该卷的【核心冲突】->【关键转折事件】->【高潮战役/事件】->【结尾获得的结果】。
-             3. **地图层级绑定**：每一卷必须明确发生在哪个“大地图/大副本”中（例如：第一卷-新手村风云；第二卷-血色试炼之地）。
-             4. **主线逻辑**：每一卷的结尾事件，必须是下一卷危机的直接起因，体现因果逻辑。
+             **核心要求（必须生成纯净的内容，严禁包含提示词）：**
+             1. **格式规范**：Title 必须是 "第一卷：[卷名]" 的格式。
+             2. **内容丰富度**：每个 Summary 代表 20-50 万字的内容，必须极其详尽。
+                - **地图流转**：明确写出本卷涉及的 2-3 个大地图（例如：青阳镇 -> 天元城 -> 上古战场）。
+                - **事件链条**：起因（卷首危机） -> 发展（换地图/升级） -> 转折（遭遇宿敌/发现阴谋） -> 高潮（卷末大战） -> 结局（收获/伏笔）。
+             3. **禁止事项**：
+                - 严禁输出 "好的，这是大纲" 之类的废话。
+                - 严禁输出 "本卷主要讲述了..." 的概括语，直接讲故事。
            `;
       } 
-      // CASE 2: OUTLINE -> PLOT (Volume -> Areas/Plot Points)
+      // CASE 2: OUTLINE -> PLOT (Volume -> Plot Points/Detailed Outline)
       else if (currentNode.type === NodeType.OUTLINE) {
-           const total = milestoneConfig?.totalPoints || 60;
+           const total = milestoneConfig?.totalPoints || 10;
            const count = milestoneConfig?.generateCount || 5;
            
            taskPrompt = `
-             任务：【区域剧情锚点生成】
+             任务：【细化剧情详纲 (Detailed Plot Outline)】
              当前分卷：${currentNode.title}
-             【分卷大纲（包含大副本规划）】：
+             【分卷大纲】：
              ${currentNode.content}
              
-             本卷预计包含 ${total} 个剧情关键节点。
-             请为我生成其中 ${count} 个关键的【剧情锚点 (PLOT)】。
+             本卷总计约 ${total} 个剧情点。请为我生成接下来的 ${count} 个关键【剧情详纲节点 (PLOT)】。
              
-             **核心要求（区域与事件）：**
-             1. **每个 Plot 节点代表一个大副本中的【特定区域】（Area）**。
-             2. 一个大副本通常包含 10 个左右的区域。请根据大纲中的大副本设定，规划这些区域的流转。
-             3. **每个 Plot 节点必须隐含至少 10 个“事件”**（主角在区域内的探索、战斗、交互序列）。
-             4. 摘要中必须描述：主角在这个区域遇到了什么？做了什么关键选择？
+             **核心生成规则（拒绝流水账，必须是强因果的事件链）：**
+             1. **每个 PLOT 节点代表一个完整的“剧情单元”**（通常包含3-5章正文）。
+             2. 不要只描述地点！要描述发生了什么。
+             3. **Summary 必须采用【节拍器】格式撰写**，包含以下要素：
+                - 【核心冲突】：主角面临什么危机或目标？
+                - 【关键交互】：遇见了谁（关联角色）？发现了什么（关联物品/线索）？
+                - 【事件推演】：
+                  1. [起因] ...
+                  2. [行动/转折] ...
+                  3. [高潮] ...
+                  4. [结果/收获] ... (明确获得了什么，或引发了什么新危机)
+             4. 确保剧情点之间紧密相连，上一个节点的【结果】是下一个节点的【起因】。
            `;
       } 
       // CASE 3: PLOT -> CHAPTER (Plot Point -> Chapters/Events)
@@ -213,19 +326,20 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
           
           taskPrompt = `
             任务：【章节拆分与事件排布】
-            当前区域/剧情点：${currentNode.title}
-            【区域剧情详纲】：
+            当前剧情单元：${currentNode.title}
+            【剧情详纲】：
             ${currentNode.content}
             
             **核心前提：**
-            该 Plot 节点包含约 10 个事件（事件 = 选择+行动+后果）。
+            该 PLOT 节点是一个剧情单元，现在需要将其落实为具体的章节 (CHAPTER)。
             
-            目标：将这些高密度的事件拆分为 ${count} 个“章节(CHAPTER)”。
+            目标：将上述详纲拆分为 ${count} 个具体的“章节”。
             
             **核心要求（三事件原则）：**
             1. **每一章必须包含至少 3 个完整事件**。
             2. 严禁注水。请列出每一章包含的具体哪 3-4 个事件。
             3. 事件之间必须紧密相连，上一事件的后果是下一事件的起因。
+            4. 标题要吸引人（网文风格）。
             
             每章预期字数：${words} 字。
           `;
@@ -235,10 +349,10 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
 
   } else if (task === 'CONTINUE') {
       taskPrompt = nextContext 
-        ? `任务：【插入过渡节点】在 ${currentNode.title} 和 ${nextContext.title} 之间插入一个过渡节点。必须包含有效的地图移动或事件推进。`
-        : `任务：【续写节点】基于 ${currentNode.title} 的内容，构思下一个逻辑连续的节点。需包含新的事件（选择->行动->后果）。`;
+        ? `任务：【插入过渡剧情】在 ${currentNode.title} 和 ${nextContext.title} 之间插入一个过渡节点。必须解决两个事件点之间的逻辑断层。`
+        : `任务：【续写后续剧情】基于 ${currentNode.title} 的结局，推演下一个逻辑紧密的剧情单元。需包含新的危机或目标。`;
   } else if (task === 'BRAINSTORM') {
-       taskPrompt = `任务：头脑风暴。基于当前地图和情节，提供 3 个高价值事件创意（如发现隐藏区域、触发连环任务、遭遇稀有精英怪）。`;
+       taskPrompt = `任务：头脑风暴。基于当前情节，提供 3 个高价值的反转或冲突创意（例如：信任的人背叛、获得的宝物有副作用、强敌突然降临）。`;
   }
 
   const prompt = `
@@ -248,11 +362,11 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
     【上级脉络 (Parent)】：${parentContext?.title} - ${parentContext?.summary}
     【前情提要 (Previous)】：${prevContext?.title} - ${prevContext?.summary}
 
-    请返回 JSON 数组，包含 'title' (标题), 'summary' (详细描述)。
+    请返回 JSON 数组，包含 'title' (简短标题), 'summary' (详细的剧情推演内容)。
   `;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await callAIWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
       model: settings.modelName,
       contents: prompt,
       config: {
@@ -274,7 +388,7 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
         // Expansion needs thinking to ensure plot consistency
         ...getThinkingConfig(settings, true)
       }
-    });
+    }));
 
     if (response.text) {
         const result = JSON.parse(response.text);
@@ -297,6 +411,10 @@ export const generateChapterContent = async (params: AIRequestParams): Promise<s
     const { currentNode, parentContext, prevContext, globalContext, storyContext, settings } = params;
     const ai = createAI(settings);
     
+    // Extract Previous Chapter Ending (Strict logic)
+    const prevContent = prevContext?.content || "";
+    const prevContentEnding = prevContent.length > 500 ? prevContent.slice(-500) : prevContent;
+    
     const notes = currentNode.content ? `【本章事件大纲】：${currentNode.content}` : "";
 
     const prompt = `
@@ -307,30 +425,35 @@ export const generateChapterContent = async (params: AIRequestParams): Promise<s
       【本章摘要】：${currentNode.summary}
       ${notes}
       
-      【所属区域/副本】：${parentContext?.title || '未知'} (区域详纲: ${parentContext?.content || ''})
+      【所属剧情单元/详纲】：${parentContext?.title || '未知'} (详纲: ${parentContext?.content || ''})
       
-      【前情回顾】：
-      ${storyContext || "（暂无前文信息，这是开头）"}
-      
-      【紧接上章】：${prevContext ? prevContext.title + " (结尾: " + prevContext.content.slice(-300) + "...)" : "这是第一章"}
+      【上章结尾（必须无缝接龙）】：
+      "...${prevContentEnding}"
       
       【关联设定】：${globalContext}
 
-      **绝对写作要求（三事件原则）：**
-      1. **本章必须写完至少 3 个完整的事件单位**。
-      2. **事件单位定义**：主角面临选择 -> 做出行动 -> 产生后果（不仅是心理活动，必须有外部反馈，如对话、战斗、获得道具）。
-      3. 节奏要快，禁止大段无意义的环境描写或心理独白，除非与后续选择强相关。
-      4. 输出 Markdown 格式。
+      **绝对写作禁令 (严格执行，否则任务失败)：**
+      1. **严禁比喻与修辞**：禁止使用“像...一样”、“宛如”、“仿佛”等比喻句。使用【白描】手法，直接描写动作和神态。
+      2. **对话驱动**：全章 60% 以上篇幅必须是对话。通过对话推动剧情。
+      3. **极简环境描写**：全章最多只能出现 1 句环境描写，且必须一笔带过，除非对战斗环境有决定性影响。
+      4. **动作描写为辅**：描写具体的肢体动作（如“他拔出剑”、“她皱眉”），坚决不要大段心理活动描写。
+      5. **【最高优先级】禁止预示性结尾**：严禁在结尾写“他不知道的是...”、“这仅仅是开始...”、"命运的齿轮..."、“一场风暴正在酝酿”等总结性或预示性的话语。这是网文大忌！
+      6. **【最高优先级】自然断章**：章节必须结束在某句具体的【对话】、具体的【动作】或某个突发的【事件瞬间】。例如：“剑尖停在他喉咙一寸处。”（好） vs “这场战斗让他明白了许多道理。”（差）。
+      
+      输出要求：
+      - Markdown 格式。
+      - 字数控制在 2000-3000 字左右。
+      - 直接开始正文，不需要写标题。
     `;
 
     try {
-        const response = await ai.models.generateContent({
+        const response = await callAIWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
             model: settings.modelName,
             contents: prompt,
             config: { 
                 temperature: 0.9,
              } 
-        });
+        }));
         return response.text || '';
     } catch (error) {
         console.error("Writing Error:", error);
@@ -338,11 +461,57 @@ export const generateChapterContent = async (params: AIRequestParams): Promise<s
     }
 };
 
+// --- NEW: Validate Chapter Ending (Style Check) ---
+export const validateEndingStyle = async (text: string, settings: AppSettings): Promise<{ isValid: boolean, fixInstruction: string }> => {
+    if (!text || text.length < 200) return { isValid: true, fixInstruction: "" };
+    
+    // Check last 800 chars to cover trailing paragraphs
+    const ending = text.slice(-800); 
+    const ai = createAI(settings);
+    
+    const prompt = `
+        任务：检查小说章节结尾是否违规（防出戏检查）。
+        【结尾片段】：
+        "...${ending}"
+        
+        **违规判定标准（命中任意一条即为 Invalid）**：
+        1. **预示未来**：出现了“命运的齿轮”、“他不知道未来会发生什么”、“这仅仅是个开始”、“风暴即将来临”等上帝视角的预告。
+        2. **总结陈词**：出现了对本章内容的总结、感悟或升华（例如“经过这一战，他成长了...”）。
+        3. **非动作/对话结尾**：结尾落在心理活动或环境描写上，而不是具体的【动作】、【对话】或【突发事件】。
+
+        返回 JSON: { "isValid": boolean, "fixInstruction": string }
+        isValid: true (合格) | false (违规).
+        fixInstruction: 如果 false，请给出修改指令。例如：“删除最后两段关于命运的感叹，直接结束在男主说‘滚’的那一刻。”
+    `;
+
+    try {
+        const response = await callAIWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
+            model: settings.modelName,
+            contents: prompt,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        isValid: { type: Type.BOOLEAN },
+                        fixInstruction: { type: Type.STRING }
+                    },
+                    required: ['isValid', 'fixInstruction']
+                }
+            }
+        }));
+        if (response.text) return JSON.parse(response.text);
+        return { isValid: true, fixInstruction: "" };
+    } catch (e) {
+        return { isValid: true, fixInstruction: "" };
+    }
+};
+
 // 4. Polish / Refine Content
 export const refineContent = async (text: string, instruction: string, settings: AppSettings): Promise<string> => {
     const ai = createAI(settings);
     const prompt = `
-        任务：【内容润色与优化】
+        任务：【内容微调与润色】
         
         原文内容：
         "${text}"
@@ -351,16 +520,16 @@ export const refineContent = async (text: string, instruction: string, settings:
         小说风格：${settings.novelStyle}
 
         要求：
-        1. 保持原意。
-        2. **增强事件的颗粒度**：如果用户觉得水，请增加主角的行动和交互细节，减少空洞描写。
-        3. 确保逻辑链条（选择->后果）清晰。
+        1. **保留原意**：不要大改剧情走向，除非指令明确要求。仅针对指令指出的问题进行局部修改。
+        2. **执行指令**：严格按照用户指令进行修改（例如删除结尾、增加动作）。
+        3. **风格保持**：坚持【白描】和【对话驱动】原则。
         4. 直接返回修改后的完整文本。
     `;
     
-    const response = await ai.models.generateContent({
+    const response = await callAIWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
         model: settings.modelName,
         contents: prompt
-    });
+    }));
     return response.text || text;
 };
 
@@ -388,7 +557,7 @@ export const extractLoreUpdates = async (chapterText: string, relevantNodes: Nod
     `;
 
     try {
-        const response = await ai.models.generateContent({
+        const response = await callAIWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
             model: settings.modelName,
             contents: prompt,
             config: {
@@ -407,7 +576,7 @@ export const extractLoreUpdates = async (chapterText: string, relevantNodes: Nod
                     }
                 }
             }
-        });
+        }));
         if (response.text) return JSON.parse(response.text);
         return [];
     } catch (error) {
@@ -460,7 +629,7 @@ export const autoExtractWorldInfo = async (
     `;
 
     try {
-        const response = await ai.models.generateContent({
+        const response = await callAIWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
             model: settings.modelName,
             contents: prompt,
             config: {
@@ -500,7 +669,7 @@ export const autoExtractWorldInfo = async (
                     required: ['newResources', 'updates', 'mentionedIds']
                 }
             }
-        });
+        }));
         
         if (response.text) return JSON.parse(response.text);
         return { newResources: [], updates: [], mentionedIds: [] };
@@ -524,9 +693,20 @@ export const generateRefinementPrompt = async (
     switch(nodeType) {
         case NodeType.ROOT: roleDescription = "资深世界观架构师"; break;
         case NodeType.OUTLINE: roleDescription = "副本关卡策划"; break;
-        case NodeType.PLOT: roleDescription = "剧情事件编剧"; break;
+        case NodeType.PLOT: roleDescription = "金牌剧情编剧"; break;
         case NodeType.CHAPTER: roleDescription = "起点/晋江金牌大神作家"; break;
         default: roleDescription = "资深编辑";
+    }
+
+    // Customized prompt generation based on node type
+    let specificGuidelines = "";
+    if (nodeType === NodeType.PLOT) {
+        specificGuidelines = `
+        针对【剧情详纲 (PLOT)】层级的特殊要求：
+        1. 所有的修改必须围绕【冲突】展开。不要增加无关的环境描写。
+        2. 确保【事件链】的紧凑性（起因->行动->结果）。
+        3. 增加“期待感”和“爽点”的设计。
+        `;
     }
 
     const prompt = `
@@ -539,9 +719,7 @@ export const generateRefinementPrompt = async (
         
         【用户模糊意图】："${userIntent}"
         
-        **特别注意**：
-        - 如果是 PLOT/CHAPTER 层级，请关注事件密度（选择->行动->后果）。
-        - 如果是 OUTLINE 层级，请关注地图副本的层级跃迁。
+        ${specificGuidelines}
 
         【生成要求】：
         请输出一段完整的提示词（Prompt），包含以下结构：
@@ -549,15 +727,15 @@ export const generateRefinementPrompt = async (
         [任务目标]: 明确要改什么。
         [风格要求]: 结合流派。
         [修改规则]: 列出3条具体的修改准则。
-
+        [具体实例]: 列出符合用户要求的一段例子。
         请直接输出生成的Prompt内容，不要包含其他解释。
     `;
 
     try {
-        const response = await ai.models.generateContent({
+        const response = await callAIWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
             model: settings.modelName,
             contents: prompt
-        });
+        }));
         return response.text?.trim() || userIntent;
     } catch (e) {
         return userIntent;

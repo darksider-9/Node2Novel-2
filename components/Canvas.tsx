@@ -221,9 +221,11 @@ const Canvas: React.FC<CanvasProps> = ({ nodes, onNodeSelect, onNodeMove, onTogg
         </svg>
 
         {visibleNodes.map(node => {
-           const colors = NODE_COLORS[node.type];
+           // Fallback to PLOT colors if type is unknown to prevent crash
+           const colors = NODE_COLORS[node.type] || NODE_COLORS[NodeType.PLOT];
            const isSelected = selectedNodeId === node.id;
-           const hasChildren = node.childrenIds.length > 0;
+           const hasChildren = (node.childrenIds || []).length > 0;
+           const contentExists = node.content && node.content.length > 0;
            
            return (
             <div
@@ -266,7 +268,7 @@ const Canvas: React.FC<CanvasProps> = ({ nodes, onNodeSelect, onNodeMove, onTogg
                        <LinkIcon size={12} className="text-white/40" />
                     </span>
                  )}
-                 {node.content.length > 0 && (
+                 {contentExists && (
                     <span title="Has Content">
                        <FileText size={12} className="text-emerald-400" />
                     </span>

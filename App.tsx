@@ -1,13 +1,15 @@
 
-import React, { useState, useEffect } from 'react';
-import { NodeData, NodeType, AppSettings, LoreUpdateSuggestion, ViewMode } from './types';
+import React, { useState, useEffect, useRef } from 'react';
+import { NodeData, NodeType, AppSettings, LoreUpdateSuggestion, ViewMode, AutoDraftConfig, AutoDraftStatus } from './types';
 import { DEFAULT_SETTINGS } from './constants';
 import Canvas from './components/Canvas';
 import EditorPanel from './components/EditorPanel';
-import Sidebar from './components/Sidebar';
+import { Sidebar } from './components/Sidebar';
 import WelcomeScreen from './components/WelcomeScreen';
+import AutoDraftModal from './components/AutoDraftModal'; // Import new component
 import { optimizeSystemInstruction, generateInitialWorldview, autoExtractWorldInfo } from './services/geminiService';
-import { Loader2 } from 'lucide-react';
+import { AutoDraftAgent } from './services/autoDraftAgent'; // Import new agent
+import { Loader2, StopCircle, Download, AlertCircle, CheckCircle, X } from 'lucide-react';
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
@@ -20,7 +22,17 @@ const App: React.FC = () => {
   const [isInitialized, setIsInitialized] = useState(false);
   const [globalLoading, setGlobalLoading] = useState(false);
   const [backgroundProcessing, setBackgroundProcessing] = useState(false); 
-  const [viewMode, setViewMode] = useState<ViewMode>('story'); // NEW State
+  const [viewMode, setViewMode] = useState<ViewMode>('story'); 
+
+  // Auto Draft States
+  const [showAutoDraftModal, setShowAutoDraftModal] = useState(false);
+  const [showStatusOverlay, setShowStatusOverlay] = useState(false); // NEW: Controls overlay visibility independent of active state
+  const [autoDraftStatus, setAutoDraftStatus] = useState<AutoDraftStatus>({ isActive: false, currentStage: '', progress: 0, logs: [] });
+  const autoDraftAgentRef = useRef<AutoDraftAgent | null>(null);
+
+  // Nodes Ref for Async Agent access
+  const nodesRef = useRef(nodes);
+  useEffect(() => { nodesRef.current = nodes; }, [nodes]);
 
   // --- Persistence Logic ---
   useEffect(() => {
@@ -162,6 +174,9 @@ const App: React.FC = () => {
                               apiKey: data.settings.apiKey || prev.apiKey || ''
                           }));
                       }
+                      if (data.autoDraftLogs) {
+                           setAutoDraftStatus(prev => ({ ...prev, logs: data.autoDraftLogs, currentStage: '已导入备份日志' }));
+                      }
                       setIsInitialized(true);
                   }
               } else {
@@ -183,7 +198,8 @@ const App: React.FC = () => {
           version: '2.0',
           timestamp: new Date().toISOString(),
           settings: settings,
-          nodes: nodes
+          nodes: nodes,
+          autoDraftLogs: autoDraftStatus.logs // NEW: Export logs
       };
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -485,6 +501,45 @@ const App: React.FC = () => {
       setViewMode('resource');
   };
 
+  // --- Auto Draft Agent Handlers ---
+  const handleStartAutoDraft = (config: AutoDraftConfig) => {
+      const root = nodes.find(n => n.type === NodeType.ROOT);
+      if (!root) return;
+
+      setShowAutoDraftModal(false);
+      setShowStatusOverlay(true); // NEW: Always show overlay on start
+      
+      // Reset logs if new session or keep? Let's reset for new run.
+      setAutoDraftStatus({ isActive: true, currentStage: 'Agent 初始化...', progress: 0, logs: [] });
+
+      const agent = new AutoDraftAgent(
+          settings,
+          config,
+          setNodes,
+          () => nodesRef.current, // Always access latest state
+          (status) => setAutoDraftStatus(prev => ({...prev, ...status}))
+      );
+      
+      autoDraftAgentRef.current = agent;
+      agent.start(root.id);
+  };
+
+  const handleStopAutoDraft = () => {
+      if (autoDraftAgentRef.current) {
+          autoDraftAgentRef.current.stop();
+          // Rely on agent to update status logic for stop
+      }
+  };
+  
+  const handleDownloadLogs = () => {
+      const blob = new Blob([autoDraftStatus.logs.join('\n')], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `AutoDraft_Logs_${new Date().toISOString()}.txt`;
+      a.click();
+  };
+
   const selectedNode = nodes.find(n => n.id === selectedNodeId) || null;
 
   if (!isInitialized) {
@@ -499,6 +554,13 @@ const App: React.FC = () => {
       );
   }
 
+  // Helper to determine status icon
+  const getStatusIcon = () => {
+      if (autoDraftStatus.isActive) return <Loader2 size={18} className="animate-spin text-indigo-400" />;
+      if (autoDraftStatus.currentStage === 'Error' || autoDraftStatus.logs.some(l => l.includes('Error') || l.includes('错误'))) return <AlertCircle size={18} className="text-red-400" />;
+      return <CheckCircle size={18} className="text-emerald-400" />;
+  };
+
   return (
     <div className="flex h-screen w-screen bg-[#0b0f19] text-white overflow-hidden font-sans relative">
       
@@ -507,6 +569,52 @@ const App: React.FC = () => {
           <div className="absolute inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center flex-col gap-4">
               <Loader2 size={48} className="animate-spin text-indigo-500" />
               <div className="text-xl font-bold text-white animate-pulse">正在施法中...</div>
+          </div>
+      )}
+
+      {/* Auto Draft Modal */}
+      {showAutoDraftModal && (
+          <AutoDraftModal 
+              onStart={handleStartAutoDraft} 
+              onClose={() => setShowAutoDraftModal(false)}
+          />
+      )}
+
+      {/* Auto Draft Status Overlay */}
+      {showStatusOverlay && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[80] bg-slate-900/90 border border-indigo-500/50 rounded-xl p-4 shadow-2xl backdrop-blur-md min-w-[350px] flex flex-col gap-2 animate-in fade-in slide-in-from-top-4">
+              <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                      {getStatusIcon()}
+                      <span className="font-bold text-sm text-indigo-100">
+                          {autoDraftStatus.isActive ? 'Agent 工作中...' : (autoDraftStatus.currentStage === 'Error' ? '任务中断' : '任务完成')}
+                      </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                      <button onClick={handleDownloadLogs} className="text-slate-400 hover:text-white transition" title="下载日志">
+                          <Download size={16} />
+                      </button>
+                      
+                      {/* Show Stop if active, Close if not */}
+                      {autoDraftStatus.isActive ? (
+                          <button onClick={handleStopAutoDraft} className="text-red-400 hover:text-red-300 transition" title="停止">
+                              <StopCircle size={18} />
+                          </button>
+                      ) : (
+                          <button onClick={() => setShowStatusOverlay(false)} className="text-slate-400 hover:text-white transition" title="关闭">
+                             <X size={18} />
+                          </button>
+                      )}
+                  </div>
+              </div>
+              <div className="text-xs text-slate-300 font-mono border-t border-slate-700 pt-2 mt-1">
+                  {autoDraftStatus.currentStage}
+              </div>
+              <div className="max-h-[100px] overflow-y-auto text-[10px] text-slate-500 font-mono bg-black/30 p-2 rounded custom-scrollbar">
+                  {autoDraftStatus.logs.slice().reverse().map((log, i) => (
+                      <div key={i} className="truncate">{log}</div>
+                  ))}
+              </div>
           </div>
       )}
 
@@ -523,6 +631,7 @@ const App: React.FC = () => {
         onExportProject={handleExportProject}
         onImportProject={handleImportProject}
         onReset={handleReset}
+        onOpenAutoDraft={() => setShowAutoDraftModal(true)}
       />
       
       <div className="flex-1 flex relative">

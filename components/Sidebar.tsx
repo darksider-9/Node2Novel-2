@@ -1,8 +1,7 @@
-
 import React, { useState, useRef } from 'react';
 import { NodeData, NodeType, AppSettings, ViewMode } from '../types';
 import { NOVEL_STYLES } from '../constants';
-import { Settings, Users, Package, Plus, Feather, ChevronDown, ChevronRight, Download, Trash2, Key, FileJson, FileText, Upload, Save, FileCode, Map, Flag, Layout, Database, Sliders, Globe, Cpu, Thermometer } from 'lucide-react';
+import { Settings, Users, Package, Plus, Feather, ChevronDown, ChevronRight, Download, Trash2, Key, FileJson, FileText, Upload, Save, FileCode, Map as MapIcon, Flag, Layout, Database, Sliders, Globe, Cpu, Thermometer, Bot } from 'lucide-react';
 
 interface SidebarProps {
   nodes: NodeData[];
@@ -17,9 +16,10 @@ interface SidebarProps {
   onExportProject: () => void;
   onImportProject: (file: File) => void;
   onReset: () => void;
+  onOpenAutoDraft: () => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ nodes, settings, viewMode, onViewModeChange, onSettingsChange, onSelectNode, onAddResource, selectedNodeId, onExportNovel, onExportProject, onImportProject, onReset }) => {
+export const Sidebar: React.FC<SidebarProps> = ({ nodes, settings, viewMode, onViewModeChange, onSettingsChange, onSelectNode, onAddResource, selectedNodeId, onExportNovel, onExportProject, onImportProject, onReset, onOpenAutoDraft }) => {
   const characters = nodes.filter(n => n.type === NodeType.CHARACTER);
   const items = nodes.filter(n => n.type === NodeType.ITEM);
   const locations = nodes.filter(n => n.type === NodeType.LOCATION);
@@ -29,6 +29,11 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, settings, viewMode, onViewMode
   const [activeResTab, setActiveResTab] = useState<'char' | 'map' | 'item' | 'faction'>('char');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // Logic to show Auto Draft Button: Only Root exists (plus maybe resources) but no Outlines yet.
+  const hasOutlines = nodes.some(n => n.type === NodeType.OUTLINE);
+  const hasRoot = nodes.some(n => n.type === NodeType.ROOT);
+  const showAutoDraft = hasRoot && !hasOutlines && viewMode === 'story';
 
   // Helper to find where a resource is used
   const getMentions = (resourceId: string) => {
@@ -145,6 +150,20 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, settings, viewMode, onViewMode
                         </ul>
                     </div>
                     
+                    {/* Auto Draft Entry */}
+                    {showAutoDraft && (
+                         <div className="animate-in slide-in-from-left-2">
+                             <button 
+                                onClick={onOpenAutoDraft}
+                                className="w-full bg-gradient-to-r from-indigo-900 to-purple-900 hover:from-indigo-800 hover:to-purple-800 text-white text-xs py-3 rounded-lg flex items-center justify-center gap-2 border border-indigo-500/30 shadow-lg shadow-indigo-900/20 group transition-all"
+                             >
+                                 <Bot size={16} className="text-indigo-300 group-hover:text-white"/> 
+                                 <span className="font-bold">开启全自动创作模式</span>
+                             </button>
+                             <p className="text-[9px] text-indigo-400/60 mt-1 text-center">中心 Agent 将接管流程，自动生成大纲与正文</p>
+                         </div>
+                    )}
+
                     {/* Actions */}
                     <div className="space-y-2">
                         <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">项目操作</h3>
@@ -176,14 +195,14 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, settings, viewMode, onViewMode
                 <div className="flex-1 flex flex-col min-h-0">
                     <div className="flex border-b border-slate-800 bg-slate-900/30 shrink-0">
                         <button onClick={() => setActiveResTab('char')} className={`flex-1 py-3 flex justify-center border-b-2 transition ${activeResTab==='char' ? 'border-pink-500 text-pink-400 bg-pink-900/10' : 'border-transparent text-slate-500 hover:text-slate-300'}`} title="角色"><Users size={14}/></button>
-                        <button onClick={() => setActiveResTab('map')} className={`flex-1 py-3 flex justify-center border-b-2 transition ${activeResTab==='map' ? 'border-teal-500 text-teal-400 bg-teal-900/10' : 'border-transparent text-slate-500 hover:text-slate-300'}`} title="地点"><Map size={14}/></button>
+                        <button onClick={() => setActiveResTab('map')} className={`flex-1 py-3 flex justify-center border-b-2 transition ${activeResTab==='map' ? 'border-teal-500 text-teal-400 bg-teal-900/10' : 'border-transparent text-slate-500 hover:text-slate-300'}`} title="地点"><MapIcon size={14}/></button>
                         <button onClick={() => setActiveResTab('faction')} className={`flex-1 py-3 flex justify-center border-b-2 transition ${activeResTab==='faction' ? 'border-orange-500 text-orange-400 bg-orange-900/10' : 'border-transparent text-slate-500 hover:text-slate-300'}`} title="势力"><Flag size={14}/></button>
                         <button onClick={() => setActiveResTab('item')} className={`flex-1 py-3 flex justify-center border-b-2 transition ${activeResTab==='item' ? 'border-indigo-500 text-indigo-400 bg-indigo-900/10' : 'border-transparent text-slate-500 hover:text-slate-300'}`} title="物品"><Package size={14}/></button>
                     </div>
                     
                     <div className="flex-1 overflow-y-auto custom-scrollbar bg-slate-950/20">
                          {activeResTab === 'char' && renderResourceList(characters, NodeType.CHARACTER, <Users size={12}/>, "暂无角色...")}
-                         {activeResTab === 'map' && renderResourceList(locations, NodeType.LOCATION, <Map size={12}/>, "暂无地点...")}
+                         {activeResTab === 'map' && renderResourceList(locations, NodeType.LOCATION, <MapIcon size={12}/>, "暂无地点...")}
                          {activeResTab === 'faction' && renderResourceList(factions, NodeType.FACTION, <Flag size={12}/>, "暂无势力...")}
                          {activeResTab === 'item' && renderResourceList(items, NodeType.ITEM, <Package size={12}/>, "暂无物品...")}
                     </div>
@@ -297,8 +316,5 @@ const Sidebar: React.FC<SidebarProps> = ({ nodes, settings, viewMode, onViewMode
                 )}
             </div>
         </div>
-    </div>
-  );
+    );
 };
-
-export default Sidebar;

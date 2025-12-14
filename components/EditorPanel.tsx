@@ -47,10 +47,15 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
   const parent = node.parentId ? nodes.find(n => n.id === node.parentId) : null;
   const prevNode = node.prevNodeId ? nodes.find(n => n.id === node.prevNodeId) : null;
   const nextNode = nodes.find(n => n.prevNodeId === node.id);
-  const colors = NODE_COLORS[node.type];
+  
+  // Safe access for colors
+  const colors = NODE_COLORS[node.type] || NODE_COLORS[NodeType.PLOT];
+  
   const resources = nodes.filter(n => [NodeType.CHARACTER, NodeType.ITEM, NodeType.LOCATION, NodeType.FACTION].includes(n.type));
-  const allowedChildren = HIERARCHY_RULES[node.type];
-  const canExpand = allowedChildren && allowedChildren.length > 0;
+  
+  // Safe access for allowed children
+  const allowedChildren = HIERARCHY_RULES[node.type] || [];
+  const canExpand = allowedChildren.length > 0;
   
   const getContext = () => {
       const rootNode = nodes.find(n => n.type === NodeType.ROOT);
@@ -65,7 +70,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
   };
 
   const getWordCount = () => {
-      return node.content.length;
+      return (node.content || "").length;
   };
 
   // ---------------- Handlers ----------------
@@ -122,6 +127,8 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
   const handleWrite = async () => {
     setGlobalLoading(true);
     try {
+      // Pass the node.prevNodeId logic to service. 
+      // The Service now handles "Strict Bai Miao" and "Previous Context Slicing"
       const content = await generateChapterContent({
         currentNode: node,
         parentContext: parent || undefined,
@@ -131,8 +138,9 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
         settings,
         task: 'WRITE'
       });
-      // Append for chapters
-      onUpdate(node.id, { content: node.content + (node.content ? '\n\n' : '') + content });
+      // Append for chapters, but usually overwrite or append depending on user flow.
+      // Here we append with newline.
+      onUpdate(node.id, { content: (node.content || "") + ((node.content || "").length > 0 ? '\n\n' : '') + content });
     } catch (e) { alert("写作失败"); } finally { setGlobalLoading(false); }
   };
 
@@ -140,7 +148,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
       if (!polishInput) return;
       setGlobalLoading(true);
       try {
-          const newText = await refineContent(node.content, polishInput, settings);
+          const newText = await refineContent(node.content || "", polishInput, settings);
           onUpdate(node.id, { content: newText });
       } finally { setGlobalLoading(false); }
   };
@@ -149,7 +157,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
       if (!summaryPolishInput) return;
       setGlobalLoading(true);
       try {
-          const newText = await refineContent(node.summary, summaryPolishInput, settings);
+          const newText = await refineContent(node.summary || "", summaryPolishInput, settings);
           onUpdate(node.id, { summary: newText });
       } finally { setGlobalLoading(false); }
   };
@@ -158,7 +166,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
       if (!genPromptIntent) return;
       setGlobalLoading(true);
       try {
-          const prompt = await generateRefinementPrompt(node.type, node.summary, genPromptIntent, settings);
+          const prompt = await generateRefinementPrompt(node.type, node.summary || "", genPromptIntent, settings);
           setPolishInput(prompt);
           setShowPromptGen(false);
           setGenPromptIntent('');
@@ -361,6 +369,21 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
                                 <ShieldCheck size={14} className="text-amber-500"/> 事件密度与逻辑自检
                             </button>
                         )}
+                        
+                        {/* CHAPTER WRITING BUTTON (Explicitly here for leaf nodes) */}
+                        {node.type === NodeType.CHAPTER && (
+                             <div className="bg-amber-900/10 border border-amber-900/50 p-3 rounded-xl space-y-2">
+                                 <div className="text-[10px] font-bold text-amber-500 uppercase flex items-center gap-1">
+                                     <Sparkles size={12}/> 核心写作 (AI Writer)
+                                 </div>
+                                 <div className="text-[10px] text-slate-400 mb-2">
+                                     {prevNode ? `将自动衔接前章: ${prevNode.title}` : '当前为首章'}
+                                 </div>
+                                 <button onClick={handleWrite} className="w-full bg-gradient-to-r from-amber-700 to-orange-700 hover:from-amber-600 hover:to-orange-600 text-white font-bold py-2.5 rounded-lg flex items-center justify-center gap-2 text-xs shadow-lg shadow-amber-900/20 transition">
+                                     <PenTool size={14} /> 生成正文 (白描/对话流)
+                                 </button>
+                             </div>
+                        )}
 
                         <div className="grid grid-cols-1 gap-3">
                             {/* Expand Logic */}
@@ -407,9 +430,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
                                         {node.type === NodeType.OUTLINE ? '生成区域剧情锚点' : '拆分章节 (高密度)'}
                                     </button>
                                 </div>
-                            ) : (
-                                <div className="text-center text-xs text-slate-600 py-2 border border-dashed border-slate-800 rounded">已是叶子节点</div>
-                            )}
+                            ) : null}
 
                             {/* Continue Logic - Hidden for ROOT */}
                             {node.type !== NodeType.ROOT && (
@@ -445,7 +466,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
 
                          {node.type === NodeType.CHAPTER && (
                             <button onClick={handleWrite} className="text-xs bg-amber-600 hover:bg-amber-500 text-white px-3 py-1 rounded flex items-center gap-2">
-                                <Sparkles size={12}/> AI 续写 (3事件)
+                                <Sparkles size={12}/> AI 续写 (接龙)
                             </button>
                         )}
                     </div>
