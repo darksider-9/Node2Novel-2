@@ -40,7 +40,7 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
                     <div className="bg-indigo-950/30 p-4 rounded-xl border border-indigo-500/20 text-xs text-indigo-200 leading-relaxed">
                         <strong className="block mb-2 text-indigo-400">🔥 模式说明：</strong>
                         该模式将接管控制权，根据世界观自动执行：
-                        生成 → 逻辑自检 → 指令优化 → 内容润色 → 下层生成。
+                        生成 → 逻辑自检 → 指令优化 → 内容润色 → 下钻生成。
                         <br/>适合项目初期快速搭建骨架和填充正文。
                     </div>
 
