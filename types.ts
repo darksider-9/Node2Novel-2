@@ -62,6 +62,15 @@ export interface AIRequestParams {
   settings: AppSettings;
   task: 'EXPAND' | 'WRITE' | 'BRAINSTORM' | 'CONTINUE' | 'POLISH' | 'SYNC_LORE' | 'BATCH_CHECK' | 'BATCH_FIX';
   
+  // New: Structural Context for precise positioning
+  structuralContext?: {
+      volumeIndex?: number;
+      plotIndex?: number;
+      chapterIndex?: number; // Relative to plot
+      globalChapterIndex?: number; // Absolute in book
+      totalWordCountTarget?: number; // For validation
+  };
+
   // User defined configs for Plot -> Chapter breakdown
   expansionConfig?: ExpansionConfig;
   
