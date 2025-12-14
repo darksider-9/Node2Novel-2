@@ -5,7 +5,8 @@ import { AIRequestParams, NodeType, NodeData, LogicValidationResult, LoreUpdateS
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Helper: Retry Wrapper
-const callAIWithRetry = async <T>(fn: () => Promise<T>, retries = 3): Promise<T> => {
+// Increased retries to 5 to handle aggressive rate limits
+const callAIWithRetry = async <T>(fn: () => Promise<T>, retries = 5): Promise<T> => {
     for (let i = 0; i < retries; i++) {
         try {
             return await fn();
@@ -13,15 +14,16 @@ const callAIWithRetry = async <T>(fn: () => Promise<T>, retries = 3): Promise<T>
             const msg = error?.message || '';
             // Check for 429 or 503 (Service Unavailable)
             if (msg.includes('429') || msg.includes('503') || error?.status === 429 || error?.code === 429) {
-                const waitTime = 2000 * (2 ** i); // 2s, 4s, 8s
-                console.warn(`[Gemini API] Rate limit hit. Retrying in ${waitTime/1000}s...`);
+                // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+                const waitTime = 2000 * (2 ** i); 
+                console.warn(`[Gemini API] Rate limit hit. Retrying in ${waitTime/1000}s... (Attempt ${i+1}/${retries})`);
                 await delay(waitTime);
                 continue;
             }
             throw error;
         }
     }
-    throw new Error("API Request Failed after max retries. Please check quota.");
+    throw new Error("API Request Failed after max retries. Please check quota or try again later.");
 };
 
 // Helper: Prioritize User Key -> Env Key

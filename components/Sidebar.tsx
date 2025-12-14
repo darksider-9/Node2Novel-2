@@ -316,5 +316,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ nodes, settings, viewMode, onV
                 )}
             </div>
         </div>
-    );
+    </div>
+  );
 };
