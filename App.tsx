@@ -13,6 +13,81 @@ import { Loader2, StopCircle, Download, AlertCircle, CheckCircle, X } from 'luci
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
+// --- Layout Logic ---
+const applyAutoLayout = (nodes: NodeData[], rootId: string): NodeData[] => {
+    // Only layout tree structure (Root -> Outline -> Plot -> Chapter)
+    // Resource nodes are ignored in this pass
+    
+    const tree: Record<string, string[]> = {};
+    const nodeMap = new Map(nodes.map(n => [n.id, n]));
+    
+    nodes.forEach(n => {
+        if(n.parentId) {
+            if(!tree[n.parentId]) tree[n.parentId] = [];
+            tree[n.parentId].push(n.id);
+        }
+    });
+
+    // Sort children by order in parent's childrenIds to allow manual reordering if needed in future
+    // For now, we rely on the order in the array which usually matches creation
+    
+    const NODE_WIDTH = 224;
+    const GAP_X = 100;
+    const GAP_Y = 40;
+    const NODE_HEIGHT = 160; 
+
+    let globalYCounter = 300; // Starting Y
+
+    const layoutRecursive = (nodeId: string, depth: number): { top: number, bottom: number } => {
+        const node = nodeMap.get(nodeId);
+        if(!node) return { top: 0, bottom: 0 };
+        
+        // 1. Position X based on depth
+        // Only update X if it's a story node. Resources have their own columns.
+        if (![NodeType.CHARACTER, NodeType.ITEM, NodeType.LOCATION, NodeType.FACTION].includes(node.type)) {
+             node.x = 100 + (depth * (NODE_WIDTH + GAP_X));
+        }
+
+        const children = tree[nodeId] || [];
+        const isCollapsed = node.collapsed;
+        
+        if (isCollapsed || children.length === 0) {
+            // Leaf or collapsed node: takes up one slot
+            node.y = globalYCounter;
+            const top = globalYCounter;
+            const bottom = globalYCounter + NODE_HEIGHT;
+            
+            // Only increment global Y for this branch's "leaf" space
+            globalYCounter += NODE_HEIGHT + GAP_Y;
+            return { top, bottom };
+        } else {
+            // Expanded parent: Place children first
+            let firstChildTop = Infinity;
+            let lastChildBottom = -Infinity;
+            
+            // Re-order children based on node.childrenIds to keep consistent sequence
+            const sortedChildrenIds = node.childrenIds.filter(id => tree[nodeId]?.includes(id));
+            const childIdsToProcess = sortedChildrenIds.length > 0 ? sortedChildrenIds : children;
+
+            childIdsToProcess.forEach(childId => {
+                const { top, bottom } = layoutRecursive(childId, depth + 1);
+                if (top < firstChildTop) firstChildTop = top;
+                if (bottom > lastChildBottom) lastChildBottom = bottom;
+            });
+            
+            // Parent is centered relative to children
+            // Center point of children bounds
+            const childrenCenterY = (firstChildTop + (lastChildBottom - NODE_HEIGHT)) / 2; // Roughly center
+            node.y = childrenCenterY;
+            
+            return { top: node.y, bottom: node.y + NODE_HEIGHT };
+        }
+    };
+
+    layoutRecursive(rootId, 0);
+    return Array.from(nodeMap.values());
+};
+
 const App: React.FC = () => {
   const [nodes, setNodes] = useState<NodeData[]>([]); // Start empty
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -54,9 +129,19 @@ const App: React.FC = () => {
           localStorage.setItem('novelweaver_init', 'true');
       }
   }, [nodes, settings, isInitialized]);
+  
+  // Helper to trigger layout update safely
+  const updateLayout = (currentNodes: NodeData[]) => {
+      const root = currentNodes.find(n => n.type === NodeType.ROOT);
+      if (root) {
+          return applyAutoLayout(currentNodes, root.id);
+      }
+      return currentNodes;
+  };
 
   // --- Background World Extraction ---
-  const triggerWorldAnalysis = async (text: string, sourceNodeId: string) => {
+  // Fix: Accepts settings override to handle initial creation
+  const triggerWorldAnalysis = async (text: string, sourceNodeId: string, settingsOverride?: AppSettings) => {
       if (backgroundProcessing) return; // Debounce roughly
       setBackgroundProcessing(true);
       console.log("Starting background world analysis...");
@@ -65,7 +150,10 @@ const App: React.FC = () => {
           // Get all current resource nodes
           const resourceNodes = nodes.filter(n => [NodeType.CHARACTER, NodeType.ITEM, NodeType.LOCATION, NodeType.FACTION].includes(n.type));
           
-          const analysis = await autoExtractWorldInfo(text, resourceNodes, settings);
+          // Use override if provided (e.g. during initial setup)
+          const currentSettings = settingsOverride || settings;
+          
+          const analysis = await autoExtractWorldInfo(text, resourceNodes, currentSettings);
           
           if (analysis.newResources.length > 0 || analysis.updates.length > 0 || analysis.mentionedIds.length > 0) {
               setNodes(prev => {
@@ -166,7 +254,10 @@ const App: React.FC = () => {
                   
                   const shouldConfirm = isInitialized;
                   if(!shouldConfirm || confirm(`准备导入项目 "${title}"。\n这将覆盖当前未保存的进度，确定吗？`)) {
-                      setNodes(data.nodes);
+                      // Apply layout on import
+                      const laidOutNodes = root ? applyAutoLayout(data.nodes, root.id) : data.nodes;
+                      setNodes(laidOutNodes);
+
                       if (data.settings) {
                           setSettings(prev => ({
                               ...prev,
@@ -295,10 +386,12 @@ const App: React.FC = () => {
               associations: []
           };
           
-          setNodes([rootNode]);
+          const initialNodes = [rootNode];
+          setNodes(initialNodes); // Single node needs no layout
           setIsInitialized(true);
           
-          triggerWorldAnalysis(initialWorldview, rootNode.id);
+          // Pass newSettings explicitly to avoid closure stale state
+          triggerWorldAnalysis(initialWorldview, rootNode.id, newSettings);
 
       } catch (error) {
           alert("初始化失败，请重试。请检查 API Key 和网络配置。");
@@ -308,10 +401,11 @@ const App: React.FC = () => {
       }
   };
 
-  const handleOptimizePrompt = async (title: string, style: string, current: string) => {
+  // Fix: Accepts settings override for initial Welcome Screen usage
+  const handleOptimizePrompt = async (title: string, style: string, current: string, settingsOverride: AppSettings) => {
       setGlobalLoading(true);
       try {
-          return await optimizeSystemInstruction(title, style, current, settings);
+          return await optimizeSystemInstruction(title, style, current, settingsOverride);
       } finally {
           setGlobalLoading(false);
       }
@@ -333,7 +427,10 @@ const App: React.FC = () => {
   };
 
   const handleToggleCollapse = (id: string) => {
-      setNodes(prev => prev.map(n => n.id === id ? { ...n, collapsed: !n.collapsed } : n));
+      setNodes(prev => {
+          const updated = prev.map(n => n.id === id ? { ...n, collapsed: !n.collapsed } : n);
+          return updateLayout(updated); // Re-layout on collapse
+      });
   };
 
   const handleSyncLoreUpdates = (updates: LoreUpdateSuggestion[]) => {
@@ -359,7 +456,7 @@ const App: React.FC = () => {
       const nextNode = prev.find(n => n.prevNodeId === id);
       const remaining = prev.filter(n => n.id !== id);
       
-      return remaining.map(n => {
+      const cleaned = remaining.map(n => {
         let newNode = { ...n };
         if (newNode.childrenIds.includes(id)) {
             newNode.childrenIds = newNode.childrenIds.filter(cid => cid !== id);
@@ -374,6 +471,7 @@ const App: React.FC = () => {
         }
         return newNode;
       });
+      return updateLayout(cleaned);
     });
     if (selectedNodeId === id) setSelectedNodeId(null);
   };
@@ -395,8 +493,8 @@ const App: React.FC = () => {
              title: data.title || 'New Node',
              summary: data.summary || '',
              content: data.summary || '', 
-             x: parent.x + 400, 
-             y: parent.y + (index * 200), 
+             x: 0, // Auto Layout will set this
+             y: 0, // Auto Layout will set this
              parentId: parentId,
              childrenIds: [],
              prevNodeId: index === 0 ? previousSiblingId : null,
@@ -415,7 +513,8 @@ const App: React.FC = () => {
              childrenIds: [...parent.childrenIds, ...newNodes.map(n => n.id)],
              collapsed: false 
          };
-         return prev.map(n => n.id === parentId ? updatedParent : n).concat(newNodes);
+         const merged = prev.map(n => n.id === parentId ? updatedParent : n).concat(newNodes);
+         return updateLayout(merged);
      });
 
      const combinedText = newNodes.map(n => `${n.title}: ${n.summary}`).join('\n\n');
@@ -428,19 +527,14 @@ const App: React.FC = () => {
       const nextNode = nodes.find(n => n.prevNodeId === prevNodeId);
       const newNodeId = generateId();
       
-      let newY = prevNode.y + 250;
-      if (nextNode) {
-          newY = (prevNode.y + nextNode.y) / 2;
-      }
-
       const newNode: NodeData = {
           id: newNodeId,
           type: newNodeData.type || prevNode.type,
           title: newNodeData.title || 'Next Node',
           summary: newNodeData.summary || '',
           content: newNodeData.summary || '',
-          x: prevNode.x, 
-          y: newY,
+          x: 0, 
+          y: 0,
           parentId: prevNode.parentId,
           childrenIds: [],
           prevNodeId: prevNodeId,
@@ -466,7 +560,8 @@ const App: React.FC = () => {
                   return n;
               });
           }
-          return [...updatedNodes, newNode];
+          const merged = [...updatedNodes, newNode];
+          return updateLayout(merged);
       });
 
       triggerWorldAnalysis(newNode.summary, newNodeId);
@@ -515,7 +610,7 @@ const App: React.FC = () => {
       const agent = new AutoDraftAgent(
           settings,
           config,
-          setNodes,
+          (updateFn) => setNodes(prev => updateLayout(updateFn(prev))), // Wrap setNodes with layout
           () => nodesRef.current, // Always access latest state
           (status) => setAutoDraftStatus(prev => ({...prev, ...status}))
       );
@@ -582,7 +677,7 @@ const App: React.FC = () => {
 
       {/* Auto Draft Status Overlay */}
       {showStatusOverlay && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[80] bg-slate-900/90 border border-indigo-500/50 rounded-xl p-4 shadow-2xl backdrop-blur-md min-w-[350px] flex flex-col gap-2 animate-in fade-in slide-in-from-top-4">
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[80] bg-slate-900/90 border border-indigo-500/50 rounded-xl p-4 shadow-2xl backdrop-blur-md min-w-[350px] max-w-[400px] flex flex-col gap-2 animate-in fade-in slide-in-from-top-4">
               <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                       {getStatusIcon()}
@@ -607,12 +702,12 @@ const App: React.FC = () => {
                       )}
                   </div>
               </div>
-              <div className="text-xs text-slate-300 font-mono border-t border-slate-700 pt-2 mt-1">
+              <div className="text-xs text-slate-300 font-mono border-t border-slate-700 pt-2 mt-1 truncate" title={autoDraftStatus.currentStage}>
                   {autoDraftStatus.currentStage}
               </div>
-              <div className="max-h-[100px] overflow-y-auto text-[10px] text-slate-500 font-mono bg-black/30 p-2 rounded custom-scrollbar">
+              <div className="max-h-[150px] overflow-y-auto text-[10px] text-slate-500 font-mono bg-black/30 p-2 rounded custom-scrollbar">
                   {autoDraftStatus.logs.slice().reverse().map((log, i) => (
-                      <div key={i} className="truncate">{log}</div>
+                      <div key={i} className="truncate border-b border-white/5 py-0.5 hover:text-slate-300 cursor-default" title={log}>{log}</div>
                   ))}
               </div>
           </div>

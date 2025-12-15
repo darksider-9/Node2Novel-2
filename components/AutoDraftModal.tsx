@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 import { AutoDraftConfig } from '../types';
-import { Bot, Play, X, Sliders } from 'lucide-react';
+import { Bot, Play, X, Sliders, FileText } from 'lucide-react';
 
 interface AutoDraftModalProps {
     onStart: (config: AutoDraftConfig) => void;
@@ -14,16 +14,20 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
         volumeCount: 3,
         plotPointsPerVolume: 10,
         chaptersPerPlot: 3,
-        wordCountPerChapter: 2000
+        wordCountPerChapter: 2000,
+        minEffectiveLength: 500,
+        recoveryLogs: ''
     });
+    
+    const [showRecovery, setShowRecovery] = useState(false);
 
     const totalChapters = config.volumeCount * config.plotPointsPerVolume * config.chaptersPerPlot;
     const estWordCount = totalChapters * config.wordCountPerChapter;
 
     return (
         <div className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-            <div className="bg-slate-900 border border-indigo-500/50 rounded-2xl w-full max-w-lg shadow-2xl animate-in fade-in zoom-in duration-300">
-                <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-indigo-900/20 rounded-t-2xl">
+            <div className="bg-slate-900 border border-indigo-500/50 rounded-2xl w-full max-w-lg shadow-2xl animate-in fade-in zoom-in duration-300 max-h-[90vh] overflow-y-auto custom-scrollbar">
+                <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-indigo-900/20 rounded-t-2xl sticky top-0 backdrop-blur-md z-10">
                     <div className="flex items-center gap-3">
                         <div className="bg-indigo-500 p-2 rounded-lg text-white">
                             <Bot size={24} />
@@ -41,7 +45,7 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
                         <strong className="block mb-2 text-indigo-400">🔥 模式说明：</strong>
                         该模式将接管控制权，根据世界观自动执行：
                         生成 → 逻辑自检 → 指令优化 → 内容润色 → 下钻生成。
-                        <br/>适合项目初期快速搭建骨架和填充正文。
+                        <br/>适合项目初期快速搭建骨架和填充正文，也支持中途接管。
                     </div>
 
                     <div>
@@ -49,7 +53,7 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
                         <textarea 
                             value={config.idea}
                             onChange={e => setConfig({...config, idea: e.target.value})}
-                            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm text-white focus:border-indigo-500 focus:outline-none h-24 resize-none"
+                            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm text-white focus:border-indigo-500 focus:outline-none h-20 resize-none"
                             placeholder="例如：赛博朋克风格的剑修，加入克苏鲁元素，主角前期很苟，后期杀伐果断..."
                         />
                     </div>
@@ -68,21 +72,43 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
                             <input type="number" min="1" max="10" value={config.chaptersPerPlot} onChange={e => setConfig({...config, chaptersPerPlot: Number(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white"/>
                         </div>
                         <div>
-                            <label className="block text-xs font-bold uppercase text-slate-500 mb-1">单章字数</label>
-                            <input type="number" step="500" value={config.wordCountPerChapter} onChange={e => setConfig({...config, wordCountPerChapter: Number(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white"/>
+                            <label className="block text-xs font-bold uppercase text-slate-500 mb-1">有效内容阈值 (字)</label>
+                            <input type="number" step="100" value={config.minEffectiveLength} onChange={e => setConfig({...config, minEffectiveLength: Number(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-indigo-300 border-indigo-500/30"/>
                         </div>
                     </div>
                     
                     <div className="flex justify-between items-center text-xs text-slate-400 font-mono bg-black/20 p-2 rounded">
-                        <span>总章节: {totalChapters}</span>
-                        <span>预估总字数: {(estWordCount / 10000).toFixed(1)} 万字</span>
+                        <span>章节总数: {totalChapters}</span>
+                        <span>单章目标: {config.wordCountPerChapter}字</span>
+                    </div>
+                    
+                    {/* Recovery Section */}
+                    <div className="border-t border-slate-800 pt-4">
+                        <button 
+                            onClick={() => setShowRecovery(!showRecovery)} 
+                            className="flex items-center gap-2 text-xs text-slate-500 hover:text-white transition w-full"
+                        >
+                            <FileText size={14}/> {showRecovery ? '隐藏故障恢复' : '故障恢复 / 日志续点'}
+                        </button>
+                        
+                        {showRecovery && (
+                            <div className="mt-3 animate-in slide-in-from-top-2">
+                                <label className="block text-[10px] text-slate-500 mb-1">粘贴之前的运行日志 (Logs) 以跳过已完成的步骤：</label>
+                                <textarea 
+                                    value={config.recoveryLogs}
+                                    onChange={e => setConfig({...config, recoveryLogs: e.target.value})}
+                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-[10px] text-slate-400 font-mono focus:border-indigo-500 focus:outline-none h-24 resize-none leading-tight"
+                                    placeholder="[12:00:00] [智能审计] 节点 XXX 质量达标 (PASS)..."
+                                />
+                            </div>
+                        )}
                     </div>
 
                     <button 
                         onClick={() => onStart(config)}
                         className="w-full py-3 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold rounded-xl shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2 transition"
                     >
-                        <Play size={18} fill="currentColor" /> 启动自动化引擎
+                        <Play size={18} fill="currentColor" /> {config.recoveryLogs ? '恢复进度并启动' : '启动自动化引擎'}
                     </button>
                 </div>
             </div>
@@ -91,4 +117,3 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
 };
 
 export default AutoDraftModal;
-    

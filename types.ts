@@ -40,6 +40,9 @@ export interface AppSettings {
   systemInstruction: string;
   novelStyle: string;
   thinkingBudget: number; // New: Controls how much the model "thinks"
+  
+  // New: Logger callback for deep debugging
+  onLog?: (message: string, type?: 'info' | 'req' | 'res') => void;
 }
 
 export interface ExpansionConfig {
@@ -120,6 +123,8 @@ export interface AutoDraftConfig {
     plotPointsPerVolume: number;
     chaptersPerPlot: number;
     wordCountPerChapter: number;
+    minEffectiveLength: number; // NEW: Threshold for "quality check"
+    recoveryLogs?: string; // NEW: Paste logs to resume progress
 }
 
 export interface AutoDraftStatus {

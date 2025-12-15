@@ -6,7 +6,7 @@ import { BookOpen, Sparkles, ChevronRight, Wand2, Key, Settings, Upload, FileJso
 
 interface WelcomeScreenProps {
     onStart: (title: string, settings: AppSettings) => void | Promise<void>;
-    onOptimizePrompt: (title: string, style: string, current: string) => Promise<string>;
+    onOptimizePrompt: (title: string, style: string, current: string, settings: AppSettings) => Promise<string>;
     onImport: (file: File) => void;
     initialSettings: AppSettings;
     isLoading: boolean;
@@ -28,7 +28,8 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onStart, onOptimizePrompt
             alert("请先输入 API Key");
             return;
         }
-        const newInstruction = await onOptimizePrompt(title, settings.novelStyle, settings.systemInstruction);
+        // Pass local 'settings' to function to avoid stale state in App.tsx
+        const newInstruction = await onOptimizePrompt(title, settings.novelStyle, settings.systemInstruction, settings);
         setSettings(prev => ({ ...prev, systemInstruction: newInstruction }));
         setShowSystemInstruction(true); // Auto expand on optimize
     };

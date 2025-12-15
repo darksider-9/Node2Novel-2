@@ -1,3 +1,4 @@
+
 import React, { useState, useRef } from 'react';
 import { NodeData, NodeType, AppSettings, ViewMode } from '../types';
 import { NOVEL_STYLES } from '../constants';
@@ -30,10 +31,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ nodes, settings, viewMode, onV
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   
-  // Logic to show Auto Draft Button: Only Root exists (plus maybe resources) but no Outlines yet.
-  const hasOutlines = nodes.some(n => n.type === NodeType.OUTLINE);
+  // Logic to show Auto Draft Button:
+  // Now: Show whenever Root exists and we are in Story mode, allowing mid-stream resumption.
   const hasRoot = nodes.some(n => n.type === NodeType.ROOT);
-  const showAutoDraft = hasRoot && !hasOutlines && viewMode === 'story';
+  const showAutoDraft = hasRoot && viewMode === 'story';
 
   // Helper to find where a resource is used
   const getMentions = (resourceId: string) => {
