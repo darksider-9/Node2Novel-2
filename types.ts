@@ -1,3 +1,4 @@
+
 export enum NodeType {
     ROOT = 'ROOT',
     OUTLINE = 'OUTLINE',
@@ -43,6 +44,7 @@ export interface ExpansionConfig {
 export interface MilestoneConfig {
     totalPoints: number;
     generateCount: number;
+    strategy?: 'linear' | 'spanning'; // NEW: Support keyframe generation
 }
 
 export interface AIRequestParams {

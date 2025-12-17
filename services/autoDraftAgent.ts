@@ -821,6 +821,12 @@ export class AutoDraftAgent {
         const parent = this.getNodes().find(n => n.id === parentId);
         if (!parent) return [];
 
+        // Special Strategy for PLOT Nodes: Keyframe + Infill
+        // Only trigger if we are asking for a significant number (e.g. > 8), otherwise linear is fine.
+        if (type === NodeType.PLOT && totalTargetCount >= 8) {
+             return this.generatePlotKeyframesAndFill(parentId, totalTargetCount, context);
+        }
+
         const existing = this.getNodes().filter(n => parent.childrenIds.includes(n.id) && n.type === type);
         const createdIds = existing.map(n => n.id);
 
@@ -833,14 +839,18 @@ export class AutoDraftAgent {
             if (lastId) await this.waitForNodes([lastId]);
             const lastNode = lastId ? this.getNodes().find(n => n.id === lastId) : undefined;
 
-            const milestoneConfig = (type === NodeType.OUTLINE || type === NodeType.PLOT) ? { totalPoints: totalTargetCount, generateCount: count } : undefined;
+            const milestoneConfig: MilestoneConfig | undefined = (type === NodeType.OUTLINE || type === NodeType.PLOT) ? { 
+                totalPoints: totalTargetCount, 
+                generateCount: count,
+                strategy: 'linear' 
+            } : undefined;
             const expansionConfig = type === NodeType.CHAPTER ? { chapterCount: count, wordCount: `${this.config.wordCountPerChapter}` } : undefined;
 
             const newNodesData = await generateNodeExpansion({
                 currentNode: createdIds.length === 0 ? parent : (lastNode || parent),
                 parentContext: createdIds.length === 0 ? undefined : parent,
                 prevContext: lastNode,
-                globalContext: this.getFullContext(parent), // Use full context getter
+                globalContext: this.getFullContext(parent),
                 settings: this.settings,
                 task: createdIds.length === 0 ? 'EXPAND' : 'CONTINUE',
                 milestoneConfig,
@@ -858,6 +868,120 @@ export class AutoDraftAgent {
             await delay(1000);
         }
         return createdIds;
+    }
+
+    // NEW: Keyframe Strategy for Plot Points
+    private async generatePlotKeyframesAndFill(
+        parentId: string,
+        totalTargetCount: number,
+        context: any
+    ): Promise<string[]> {
+        const parent = this.getNodes().find(n => n.id === parentId)!;
+        
+        // 1. Generate ~5 Keyframes spanning the volume
+        this.log(`[结构生成] 正在规划分卷 "${parent.title}" 的关键锚点 (Keyframes)...`);
+        
+        const keyframeCount = 5;
+        const keyframeConfig: MilestoneConfig = { 
+            totalPoints: totalTargetCount, 
+            generateCount: keyframeCount,
+            strategy: 'spanning' 
+        };
+
+        const keyframesData = await generateNodeExpansion({
+            currentNode: parent,
+            parentContext: undefined,
+            prevContext: undefined,
+            globalContext: this.getFullContext(parent),
+            settings: this.settings,
+            task: 'EXPAND', // EXPAND from Parent
+            milestoneConfig: keyframeConfig,
+            structuralContext: context
+        });
+
+        if (keyframesData.length === 0) return [];
+
+        let ids = this.addNodesToState(parentId, keyframesData);
+        await this.waitForNodes(ids);
+
+        // 2. Infill Gaps
+        // Current state: [K1, K2, K3, K4, K5]
+        // We need to fill between them to reach totalTargetCount.
+        
+        // Calculate needed nodes per interval
+        // Intervals = keyframesData.length - 1
+        // Remaining = totalTargetCount - keyframesData.length
+        // PerInterval = Remaining / Intervals
+        
+        let currentIds = [...ids];
+        const intervals = currentIds.length - 1;
+        if (intervals > 0) {
+            const remainingTotal = totalTargetCount - currentIds.length;
+            const perIntervalBase = Math.floor(remainingTotal / intervals);
+            let remainder = remainingTotal % intervals;
+
+            this.log(`[结构生成] 正在填充关键锚点之间的剧情空隙...`);
+
+            // Iterate backwards to allow insertion without messing up indices of earlier pairs? 
+            // Actually, we use IDs so index doesn't matter for finding context, but we need to insert correctly in the linked list logic.
+            // Wait, addNodesToState adds AFTER a node.
+            
+            // We iterate from first gap to last.
+            for (let i = 0; i < intervals; i++) {
+                if (this.stopSignal) break;
+                
+                const startId = currentIds[i]; // K1
+                const endId = currentIds[i+1]; // K2
+                
+                const startNode = this.getNodes().find(n => n.id === startId);
+                const endNode = this.getNodes().find(n => n.id === endId);
+                
+                const countForThisGap = perIntervalBase + (remainder > 0 ? 1 : 0);
+                if (remainder > 0) remainder--;
+                
+                if (countForThisGap <= 0) continue;
+
+                this.log(`[填充剧情] 在 ${startNode?.title.slice(0,8)}... 和 ${endNode?.title.slice(0,8)}... 之间生成 ${countForThisGap} 个节点`);
+
+                const fillData = await generateNodeExpansion({
+                    currentNode: startNode!,
+                    parentContext: parent,
+                    prevContext: startNode!, // Start of gap
+                    nextContext: endNode!,   // End of gap
+                    globalContext: this.getFullContext(parent),
+                    settings: this.settings,
+                    task: 'CONTINUE', // Use CONTINUE for Infill
+                    milestoneConfig: { totalPoints: countForThisGap, generateCount: countForThisGap, strategy: 'linear' },
+                    structuralContext: context
+                });
+                
+                if (fillData.length > 0) {
+                    const newIds = this.addNodesToState(parentId, fillData, startId); // Insert after startId
+                    await this.waitForNodes(newIds);
+                    
+                    // We need to update our local list to ensure correct order?
+                    // Actually, 'addNodesToState' handles linking prevNodeId.
+                    // But 'currentIds' array is stale. We don't need to update it for the loop logic 
+                    // because we are processing pairs (i, i+1) which are the ORIGINAL keyframes.
+                    // K1 -> [New...] -> K2.  Next loop: K2 -> [New...] -> K3.
+                    // This is correct.
+                }
+                
+                await delay(1000);
+            }
+        }
+        
+        // Return all children of parent, sorted
+        const finalParent = this.getNodes().find(n => n.id === parentId);
+        const allChildren = this.getNodes().filter(n => finalParent?.childrenIds.includes(n.id) && n.type === NodeType.PLOT);
+        // Simple sort by Y? Or follow prevNode chain? 
+        // addNodesToState updates Y position linearly if sequential. 
+        // But here we inserted. We might need a re-layout trigger or just return IDs.
+        // The App's layout engine handles Y based on tree order or just linked list?
+        // App.tsx uses 'tree' order from childrenIds array.
+        // addNodesToState updates childrenIds array correctly (splice or push).
+        
+        return allChildren.map(n => n.id);
     }
 
     private async writeChapter(chapterId: string, vIdx: number, pIdx: number, cIdx: number) {
@@ -925,34 +1049,45 @@ export class AutoDraftAgent {
 
     private async batchCheckAndFix(nodeIds: string[], parentId: string) {
         if (nodeIds.length < 2) return;
-        const allExist = await this.waitForNodes(nodeIds, 5000);
-        if (!allExist) return;
+        
+        // BATCHING: Split checks into chunks of 10
+        const BATCH_SIZE = 10;
+        
+        for (let i = 0; i < nodeIds.length; i += BATCH_SIZE) {
+            if (this.stopSignal) break;
+            const batchIds = nodeIds.slice(i, i + BATCH_SIZE);
+            
+            const allExist = await this.waitForNodes(batchIds, 5000);
+            if (!allExist) continue;
 
-        let attempts = 0;
-        let hasConflicts = true;
+            let attempts = 0;
+            let hasConflicts = true;
 
-        while(hasConflicts && attempts < 1 && !this.stopSignal) { 
-            attempts++;
-            const nodesToCheck = this.getNodes().filter(n => nodeIds.includes(n.id));
-            const parent = this.getNodes().find(n => n.id === parentId);
-            if (!parent) break;
+            this.log(`[逻辑校验] 正在检查第 ${i+1}-${i+batchIds.length} 个节点...`);
 
-            const result = await batchValidateNodes(nodesToCheck, parent, this.getFullContext(parent), this.settings);
+            while(hasConflicts && attempts < 1 && !this.stopSignal) { 
+                attempts++;
+                const nodesToCheck = this.getNodes().filter(n => batchIds.includes(n.id));
+                const parent = this.getNodes().find(n => n.id === parentId);
+                if (!parent) break;
 
-            if (result.hasConflicts && result.fixes.length > 0) {
-                this.log(`[逻辑修复] 发现 ${result.fixes.length} 个问题，正在修正...`);
-                for (const fix of result.fixes) {
-                    if (this.stopSignal) break;
-                    const node = this.getNodes().find(n => n.id === fix.id);
-                    if (node) {
-                        const rawNewSummary = await applyLogicFixes(node, fix.instruction, this.settings);
-                        const newSummary = this.sanitizeContent(rawNewSummary);
-                        this.updateNode(node.id, { summary: newSummary, content: node.type !== NodeType.CHAPTER ? newSummary : node.content });
-                        await delay(1000);
+                const result = await batchValidateNodes(nodesToCheck, parent, this.getFullContext(parent), this.settings);
+
+                if (result.hasConflicts && result.fixes.length > 0) {
+                    this.log(`[逻辑修复] 发现 ${result.fixes.length} 个问题，正在修正...`);
+                    for (const fix of result.fixes) {
+                        if (this.stopSignal) break;
+                        const node = this.getNodes().find(n => n.id === fix.id);
+                        if (node) {
+                            const rawNewSummary = await applyLogicFixes(node, fix.instruction, this.settings);
+                            const newSummary = this.sanitizeContent(rawNewSummary);
+                            this.updateNode(node.id, { summary: newSummary, content: node.type !== NodeType.CHAPTER ? newSummary : node.content });
+                            await delay(1000);
+                        }
                     }
+                } else {
+                    hasConflicts = false;
                 }
-            } else {
-                hasConflicts = false;
             }
         }
     }
@@ -962,9 +1097,26 @@ export class AutoDraftAgent {
         if (!parent) return [];
 
         const existingChildren = this.getNodes().filter(n => parent.childrenIds.includes(n.id));
-        const startY = existingChildren.length > 0 ? Math.max(...existingChildren.map(c => c.y)) + 250 : parent.y;
         
-        let prevId = afterNodeId || (existingChildren.length > 0 ? existingChildren[existingChildren.length-1].id : null);
+        // Calculate insert index
+        let insertIndex = existingChildren.length;
+        let prevId = existingChildren.length > 0 ? existingChildren[existingChildren.length-1].id : null;
+        let nextId: string | null = null;
+        let startY = existingChildren.length > 0 ? Math.max(...existingChildren.map(c => c.y)) + 250 : parent.y;
+
+        if (afterNodeId) {
+            const idx = existingChildren.findIndex(n => n.id === afterNodeId);
+            if (idx !== -1) {
+                insertIndex = idx + 1;
+                prevId = afterNodeId;
+                if (idx < existingChildren.length - 1) {
+                    nextId = existingChildren[idx + 1].id;
+                }
+                // Update StartY to be after previous node
+                const prevNode = existingChildren[idx];
+                startY = prevNode.y + 250;
+            }
+        }
         
         const newNodes: NodeData[] = [];
         const ids: string[] = [];
@@ -982,16 +1134,51 @@ export class AutoDraftAgent {
                 y: startY + (idx * 250),
                 parentId: parentId,
                 childrenIds: [],
-                prevNodeId: prevId,
+                prevNodeId: prevId, // Chain Link
                 collapsed: false,
                 associations: parent.associations || []
             });
             prevId = id;
         });
 
+        // If we inserted in the middle, link the last new node to the old next node
+        if (nextId && newNodes.length > 0) {
+             // We'll update the nextId node's prevNodeId in the state update below
+        }
+
         this.setNodes(prev => {
             let updated = [...prev];
-            updated = updated.map(n => n.id === parentId ? { ...n, childrenIds: [...n.childrenIds, ...ids], collapsed: false } : n);
+            
+            // 1. Update Parent Children List (Insert)
+            const p = updated.find(n => n.id === parentId);
+            if (p) {
+                const newChildrenIds = [...p.childrenIds];
+                // We need to find the correct index in the raw ID list
+                // If appending, it's easy. If inserting, we used 'afterNodeId'.
+                if (afterNodeId) {
+                     const rawIdx = newChildrenIds.indexOf(afterNodeId);
+                     if (rawIdx !== -1) {
+                         newChildrenIds.splice(rawIdx + 1, 0, ...ids);
+                     } else {
+                         newChildrenIds.push(...ids);
+                     }
+                } else {
+                     newChildrenIds.push(...ids);
+                }
+                updated = updated.map(n => n.id === parentId ? { ...n, childrenIds: newChildrenIds, collapsed: false } : n);
+            }
+
+            // 2. Link Next Node (if any) to the last new node
+            if (nextId) {
+                const lastNewId = ids[ids.length - 1];
+                updated = updated.map(n => n.id === nextId ? { ...n, prevNodeId: lastNewId } : n);
+            }
+
+            // 3. Shift following nodes down (Layout)
+            // Ideally we run a full layout pass, but let's shift locally if possible.
+            // For now, rely on standard layout or just simple stack.
+            // The 'setNodes' in App.tsx calls 'updateLayout', so strict Y coord here is temporary hint.
+            
             return [...updated, ...newNodes];
         });
 

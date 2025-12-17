@@ -288,7 +288,7 @@ export const validateStoryLogic = async (params: AIRequestParams): Promise<Logic
       
       【设定库】：${globalContext}
       【当前节点】：[${currentNode.type}] ${currentNode.title}
-      【内容】：${currentNode.content.slice(0, 1500)}...
+      【内容】：${currentNode.content.slice(0, 2000)}...
       
       请检查：
       1. **事件密度**：是否达到了“高密度”标准？(是否包含多个具体事件，还是在水字数？)。
@@ -457,6 +457,7 @@ export const analyzeAndGenerateFix = async (
                - 正确：主角要变强 -> 寻找X神器 -> 揭开Y秘密 -> 击败Z反派 -> 重塑世界。
             2. **力量体系**：等级划分是否清晰且具有吸引力？
             3. **核心爽点**：是否符合"${settings.novelStyle}"流派？
+            4. **【增量原则】**：除非用户明确要求删除，否则严禁删减原有的设定（如人物、势力、背景）。只能在原有基础上进行补充或修正。
             `;
             break;
         case NodeType.OUTLINE:
@@ -594,10 +595,21 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
              3. **地图流转**：明确指出本卷涉及的地图转换（例如：从新手村 -> 县城）。
              4. **禁止注水**：直接写干货剧情。不要写“主角心情很复杂”这种话，要写“主角杀死了敌人，夺取了宝物，引发了追杀”。
              5. **索引连续性**：如果上一个节点已经是第N卷，请接着生成第N+1卷。
+             6. **区域跨度均衡**：确保分卷内容的结尾自然过渡到下一个大区域/副本的开启。不要让分卷在某个高潮中间突然截断，也不要留太长的尾巴。
+             7.**首尾自然：要保证分卷的第一个和最后一个，符合一本书的卷的开始和结尾。
            `;
       } 
-      // CASE 2: OUTLINE -> PLOT (UPDATED FOR REALM/COMBAT LOGIC)
+      // CASE 2: OUTLINE -> PLOT (UPDATED FOR REALM/COMBAT LOGIC + SPANNING MODE)
       else if (currentNode.type === NodeType.OUTLINE) {
+           const isSpanningStrategy = milestoneConfig?.strategy === 'spanning';
+           const strategyNote = isSpanningStrategy 
+             ? `**关键生成策略 (Spanning)**: 请生成分布在【整个分卷时间线】上的 ${count} 个关键锚点 (Keyframes)。
+                - 第1个节点：分卷的开篇/起因。
+                - 中间节点：分卷中期的重大转折点/高潮前奏。
+                - 最后一个节点：分卷的最终结局/高潮结束。
+                - 这些节点**不需要**是连续的，它们是支撑起整个分卷骨架的柱子。`
+             : `**常规生成策略 (Linear)**: 请从上一个节点接续，生成紧随其后的 ${count} 个连续剧情点。`;
+
            taskPrompt = `
              任务：【分卷剧情拆解 (Volume Breakdown)】
              
@@ -609,6 +621,7 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
              ${prevContext ? `已生成的上一个剧情点：${prevContext.title} (${prevContext.summary})` : '当前尚未生成任何剧情点，请从分卷的开篇开始。'}
              
              目标：**基于分卷梗概**，将接下来的剧情拆解为 ${count} 个具体的“剧情事件点 (PLOT)”。
+             ${strategyNote}
              
              **核心规则（重要 - 必须执行）：**
              1. **【战力与境界校验】(CRITICAL)**：
@@ -655,9 +668,28 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
           `;
       }
   } else if (task === 'CONTINUE') {
-      taskPrompt = nextContext 
-        ? `任务：【插入过渡剧情】在 ${currentNode.title} 和 ${nextContext.title} 之间插入 ${count} 个过渡节点。`
-        : `任务：【续写后续剧情】基于 ${currentNode.title} 的结局，推演下 ${count} 个逻辑紧密的剧情单元。`;
+      if (nextContext) {
+           taskPrompt = `
+             任务：【插入过渡剧情 (Infill) - 剧情点生成】
+             
+             前置节点 (Start)：${currentNode.title}
+             后置节点 (End)：${nextContext.title}
+             
+             目标：请生成 ${count} 个中间剧情节点 (PLOT)，填补上述两个节点之间的剧情空白。
+             确保剧情从前置节点的结局自然过渡到后置节点的开端，逻辑连贯，解释清楚中间发生了什么。
+             
+             **核心要求（与标准剧情点一致）：**
+             1. **【战力与境界校验】**：每个过渡节点 summary 必须明确注明主角**当前的境界/等级**。如果涉及战斗，严禁无理由跨阶杀敌，必须说明使用的资源/金手指。
+             2. **【格式要求】**：必须是“流水账”或“事件列表”格式。列出该场景内发生的 3-5 个具体动作 (Action Beats)。**不要写心理描写！不要写对话！**
+             3. **【逻辑衔接】**：
+                - 第1个生成的节点必须紧接前置节点。
+                - 最后一个生成的节点必须完美引出后置节点的开局。
+                - 中间的节点负责铺垫、转折或展示途中的遭遇。
+            4. **人物完备性**：如果在该剧情中会出现任何【有名字】的角色（包括配角、反派），必须在此处明确列出。后续正文写作严禁凭空增加有名字的新人物（路人甲乙除外）。
+           `;
+      } else {
+           taskPrompt = `任务：【续写后续剧情】基于 ${currentNode.title} 的结局，推演下 ${count} 个逻辑紧密的剧情单元。`;
+      }
   }
 
   const prompt = `
