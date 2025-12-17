@@ -1,6 +1,6 @@
 
 import { NodeData, NodeType, AppSettings, AutoDraftConfig, AutoDraftStatus, MilestoneConfig, ExpansionConfig } from '../types';
-import { generateNodeExpansion, refineContent, analyzeAndGenerateFix, batchValidateNodes, applyLogicFixes, generateChapterContent, validateEndingStyle, validateVolumeSpan, autoExtractWorldInfo, associateRelevantResources } from './geminiService';
+import { generateNodeExpansion, refineContent, analyzeAndGenerateFix, batchValidateNodes, applyLogicFixes, generateChapterContent, validateEndingStyle, validateVolumeSpan, autoExtractWorldInfo, associateRelevantResources, consultStructuralArchitect, analyzePlotPacing } from './geminiService';
 
 type NodeUpdateFn = (nodes: NodeData[]) => NodeData[];
 
@@ -489,6 +489,73 @@ export class AutoDraftAgent {
             this.validatedSessionIds.add(ancestorId);
         }
     }
+    
+    // --- NEW: GAP ANALYSIS (Plot Pacing Agent) ---
+    private async refinePlotSequence(plotIds: string[], parentId: string) {
+        if (!this.config.enablePlotAnalysis || plotIds.length < 2) return;
+
+        await this.waitForNodes([parentId, ...plotIds]);
+        const allNodes = this.getNodes();
+        const parent = allNodes.find(n => n.id === parentId);
+        const plots = allNodes.filter(n => plotIds.includes(n.id)).sort((a,b) => a.y - b.y); // Ensure order
+        
+        if(!parent) return;
+
+        this.log(`[节奏分析 Agent] 检查分卷 ${parent.title} 的剧情连贯性...`);
+        
+        const pacing = this.config.pacing || 'Normal';
+        const analysis = await analyzePlotPacing(plots, parent, pacing, this.settings);
+        
+        if (analysis.insertAfterIds.length > 0) {
+            this.log(`[节奏优化] 建议插入 ${analysis.insertAfterIds.length} 个过渡剧情点。`);
+            
+            for (let i = 0; i < analysis.insertAfterIds.length; i++) {
+                if (this.stopSignal) break;
+                const afterId = analysis.insertAfterIds[i];
+                const summary = analysis.summaries[i];
+                
+                // Add Sibling Logic
+                const prevNode = this.getNodes().find(n => n.id === afterId);
+                if (prevNode) {
+                    const newId = this.generateId();
+                    const newNode: NodeData = {
+                        id: newId,
+                        type: NodeType.PLOT,
+                        title: `[过渡] ${summary.slice(0, 10)}...`,
+                        summary: summary,
+                        content: summary,
+                        x: prevNode.x,
+                        y: prevNode.y + 125, // temp offset
+                        parentId: parentId,
+                        childrenIds: [],
+                        prevNodeId: afterId,
+                        associations: prevNode.associations,
+                        collapsed: false
+                    };
+                    
+                    this.log(`[自动插入] 过渡节点: ${newNode.title}`);
+                    
+                    // Insert into state (logic similar to App.handleAddSibling)
+                    this.setNodes(prev => {
+                        let updated = [...prev];
+                        // Link next node to new node
+                        const nextNode = updated.find(n => n.prevNodeId === afterId);
+                        if(nextNode) nextNode.prevNodeId = newId;
+                        
+                        // Link parent
+                        const p = updated.find(n => n.id === parentId);
+                        if(p) p.childrenIds = [...p.childrenIds, newId];
+                        
+                        return [...updated, newNode];
+                    });
+                    
+                    await delay(500);
+                }
+            }
+        } else {
+             this.log(`[节奏分析] 剧情连贯，节奏符合 (${pacing})。`);
+        }
+    }
 
     // --- MAIN EXECUTION (Refactored to Breadth-First Strategy) ---
     
@@ -504,6 +571,12 @@ export class AutoDraftAgent {
         
         try {
             this.log("启动全自动创作引擎 (广度优先模式)...");
+            if (this.config.enablePlotAnalysis) {
+                this.log(`已启用智能情节设计 Agent (节奏: ${this.config.pacing || 'Normal'})`);
+            }
+            if (this.config.outlineMode) {
+                this.log(`🔥 已开启【大纲模式】：将跳过正文撰写，仅生成剧情细纲。`);
+            }
             
             // --- PHASE 1: STRUCTURE & SKELETON (Breadth-First Validation) ---
             this.log("=== 阶段一：全书骨架铺设与校验 ===");
@@ -525,7 +598,13 @@ export class AutoDraftAgent {
             }
 
             // 2. Ensure ALL Volumes exist
-            const volumeIds = await this.ensureChildren(rootNodeId, NodeType.OUTLINE, this.config.volumeCount);
+            // Dynamic Count Check
+            let targetVolumeCount = this.config.volumeCount;
+            /* 
+               Usually Volume count is user defined, AI shouldn't change book length easily. 
+               Skipping dynamic count for Volumes to respect user scope. 
+            */
+            const volumeIds = await this.ensureChildren(rootNodeId, NodeType.OUTLINE, targetVolumeCount);
             
             // 3. Process ALL Volumes (Structure Check + RESOURCE SYNC)
             this.log(`>> 正在校验 ${volumeIds.length} 个分卷大纲...`);
@@ -555,15 +634,40 @@ export class AutoDraftAgent {
             for (let i = 0; i < volumeIds.length; i++) {
                 if (this.stopSignal) break;
                 const volId = volumeIds[i];
+                const volNode = this.getNodes().find(n => n.id === volId);
                 
+                // DYNAMIC AGENT: Consult Structural Architect for Plot Count
+                let targetPlotCount = this.config.plotPointsPerVolume;
+                if (this.config.enablePlotAnalysis && volNode) {
+                    this.log(`[结构规划 Agent] 正在分析分卷 "${volNode.title}" 的体量...`);
+                    const advice = await consultStructuralArchitect(
+                        volNode, 
+                        NodeType.PLOT, 
+                        this.config.pacing || 'Normal', 
+                        targetPlotCount, 
+                        this.settings
+                    );
+                    this.log(`[结构规划] 建议生成 ${advice.count} 个剧情点。理由：${advice.reason}`);
+                    targetPlotCount = advice.count;
+                }
+
                 // Ensure Plots exist
-                const plotIds = await this.ensureChildren(volId, NodeType.PLOT, this.config.plotPointsPerVolume, { volumeIndex: i + 1 });
+                const plotIds = await this.ensureChildren(volId, NodeType.PLOT, targetPlotCount, { volumeIndex: i + 1 });
                 
+                // DYNAMIC AGENT: Pacing Check (Gap Filling)
+                if (this.config.enablePlotAnalysis) {
+                     await this.refinePlotSequence(plotIds, volId);
+                }
+
+                // Re-fetch Plot IDs (in case gaps were inserted)
+                const finalVolNode = this.getNodes().find(n => n.id === volId);
+                const finalPlotIds = finalVolNode ? this.getNodes().filter(n => finalVolNode.childrenIds.includes(n.id) && n.type === NodeType.PLOT).map(n=>n.id) : plotIds;
+
                 // Batch Validate
-                await this.batchCheckAndFix(plotIds, volId);
+                await this.batchCheckAndFix(finalPlotIds, volId);
 
                 // Individual Optimization + RESOURCE SYNC
-                for (const plotId of plotIds) {
+                for (const plotId of finalPlotIds) {
                     if (this.stopSignal) break;
                     
                     if (this.validatedSessionIds.has(plotId)) continue;
@@ -590,7 +694,24 @@ export class AutoDraftAgent {
                 for (let j = 0; j < plotIds.length; j++) {
                     if (this.stopSignal) break;
                     const plotId = plotIds[j];
-                    const cIds = await this.ensureChildren(plotId, NodeType.CHAPTER, this.config.chaptersPerPlot, {
+                    const plotNode = this.getNodes().find(n => n.id === plotId);
+
+                    // DYNAMIC AGENT: Consult Structural Architect for Chapter Count
+                    let targetChapCount = this.config.chaptersPerPlot;
+                    if (this.config.enablePlotAnalysis && plotNode) {
+                         // We log less frequently here to avoid spam
+                         const advice = await consultStructuralArchitect(
+                            plotNode,
+                            NodeType.CHAPTER,
+                            this.config.pacing || 'Normal',
+                            targetChapCount,
+                            this.settings
+                         );
+                         // this.log(`[章节规划] ${plotNode.title} -> ${advice.count} 章`);
+                         targetChapCount = advice.count;
+                    }
+
+                    const cIds = await this.ensureChildren(plotId, NodeType.CHAPTER, targetChapCount, {
                         volumeIndex: i + 1,
                         plotIndex: j + 1,
                         globalChapterIndex: tempGlobalChapterIdx
@@ -641,10 +762,20 @@ export class AutoDraftAgent {
                         await this.auditAncestry(chapId);
 
                         // --- WRITING PIPELINE ---
-                        await this.writeChapter(chapId, i+1, j+1, k+1);
-                        await this.optimizeNode(chapId, this.config.wordCountPerChapter, this.globalChapterCounter);
-                        await this.expansionPhase(chapId, this.config.wordCountPerChapter);
-                        await this.ensureChapterEnding(chapId);
+                        // CONDITIONAL LOGIC FOR OUTLINE MODE
+                        if (!this.config.outlineMode) {
+                            await this.writeChapter(chapId, i+1, j+1, k+1);
+                            await this.optimizeNode(chapId, this.config.wordCountPerChapter, this.globalChapterCounter);
+                            await this.expansionPhase(chapId, this.config.wordCountPerChapter);
+                            await this.ensureChapterEnding(chapId);
+                        } else {
+                            // In Outline Mode, we might want to ensure the "summary" (fine outline) is good,
+                            // but we skip the "content" (prose) generation.
+                            this.log(`[大纲模式] 跳过正文撰写: ${chapNode?.title}`);
+                            // Optional: Ensure content mirrors summary for export readability
+                            this.updateNode(chapId, { content: chapNode?.summary }); 
+                            await delay(100);
+                        }
                         
                         // Mark chapter as done in cache (optional)
                         this.validatedSessionIds.add(chapId);

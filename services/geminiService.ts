@@ -171,6 +171,111 @@ export const optimizeSystemInstruction = async (title: string, style: string, cu
     return await callOpenAI([{ role: "user", content: prompt }], settings);
 };
 
+// --- NEW AGENT: Structural Architect & Pacing Analyst ---
+
+export const consultStructuralArchitect = async (
+    parentNode: NodeData,
+    targetChildType: NodeType,
+    pacing: 'Fast' | 'Normal' | 'Slow',
+    baseCount: number, // User's manual config as a hint
+    settings: AppSettings
+): Promise<{ count: number, reason: string }> => {
+    const prompt = `
+        角色：【资深网文结构规划师】
+        任务：动态决定下一层级所需的节点数量。
+        
+        【上级节点】：[${parentNode.type}] ${parentNode.title}
+        【上级内容】：${parentNode.summary}
+        
+        【规划目标】：生成子节点类型为 ${targetChildType}。
+        【用户期望节奏】：${pacing} (Fast=爽文/快节奏, Normal=标准, Slow=慢热/铺垫多)。
+        【用户基准建议】：${baseCount} 个。
+        
+        请分析上级内容的体量和信息密度，结合节奏要求，给出一个合理的子节点数量建议。
+        
+        **决策原则**：
+        1. **Plot -> Chapter (最重要)**：
+           - 基本原则一个小事件一章，但是出现新的都要交代一些物品地区人物背景铺垫，不能凭空产生。
+           - 如果剧情点只是一个单一小事件（如“获得宝物”），${pacing==='Slow'?'2':'1'} 章即可。
+           - 如果是过渡剧情（赶路/日常），${pacing==='Fast'?'1':'2-3'} 章（制造悬念串联）。
+           - 如果是中大型事件/高潮（如“决战BOSS/宗门大比”），必须多章铺垫。Fast节奏给 3-4 章，Slow节奏给 5-7 章。
+        2. **Outline -> Plot**：
+           - 确保覆盖分卷的所有关键转折。如果事件过多，Fast节奏下就是默认生成的内容，而Slow节奏增加支线。
+        3. **Root -> Outline**：
+           - 规划全书分卷数。合理划分分卷数量
+
+        请输出建议的数量 (count) 和简短理由 (reason)。
+        
+        **Output JSON Format Required:**
+        { "count": number, "reason": "string" }
+    `;
+
+    try {
+        const text = await callOpenAI([
+            { role: "system", content: settings.systemInstruction },
+            { role: "user", content: prompt }
+        ], settings, true);
+        return JSON.parse(text);
+    } catch (e) {
+        return { count: baseCount, reason: "Analysis failed, using default." };
+    }
+};
+
+export const analyzePlotPacing = async (
+    plotNodes: NodeData[],
+    parentOutline: NodeData,
+    pacing: 'Fast' | 'Normal' | 'Slow',
+    settings: AppSettings
+): Promise<{ insertAfterIds: string[], summaries: string[] }> => {
+    if (plotNodes.length < 2) return { insertAfterIds: [], summaries: [] };
+
+    const sequence = plotNodes.map(n => `[ID:${n.id}] ${n.title}: ${n.summary}`).join('\n');
+    
+    const prompt = `
+        角色：【网文节奏精修师】
+        任务：检查当前分卷的剧情点序列，判断是否需要插入“过渡剧情”以调节节奏。
+        
+        【当前分卷】：${parentOutline.title}
+        【剧情序列】：
+        ${sequence}
+        
+        【期望节奏】：${pacing}
+        
+        **分析原则**：
+        1. **连贯性检查**：如果两个剧情点之间跨度过大（例如从“凡人村”直接跳到“仙界大战”），必须插入过渡。
+        2. **节奏控制**：
+           - 如果是 **Fast (爽文)**：尽量少插入，除非逻辑断裂。保持紧凑。
+           - 如果是 **Slow (慢热)**：在两个高潮事件之间，插入“日常/整顿/铺垫”节点。
+           - 如果是 **Normal**：保持张弛有度。
+           
+        请返回一个列表，说明需要在哪些 ID 之后插入什么内容的过渡节点。
+        如果没有需要插入的，返回空数组。
+        
+        **Output JSON Format Required:**
+        { 
+            "insertions": [ 
+                { "insertAfterId": "string", "newSummary": "string" } 
+            ] 
+        }
+    `;
+
+    try {
+        const text = await callOpenAI([
+            { role: "system", content: settings.systemInstruction },
+            { role: "user", content: prompt }
+        ], settings, true);
+        const res = JSON.parse(text);
+        
+        const validInsertions = (res.insertions || []).filter((i: any) => plotNodes.some(p => p.id === i.insertAfterId));
+        return {
+            insertAfterIds: validInsertions.map((i: any) => i.insertAfterId),
+            summaries: validInsertions.map((i: any) => i.newSummary)
+        };
+    } catch (e) {
+        return { insertAfterIds: [], summaries: [] };
+    }
+};
+
 // --- 2. Logic Validation (JSON) ---
 
 export const validateStoryLogic = async (params: AIRequestParams): Promise<LogicValidationResult> => {
@@ -491,7 +596,7 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
              5. **索引连续性**：如果上一个节点已经是第N卷，请接着生成第N+1卷。
            `;
       } 
-      // CASE 2: OUTLINE -> PLOT
+      // CASE 2: OUTLINE -> PLOT (UPDATED FOR REALM/COMBAT LOGIC)
       else if (currentNode.type === NodeType.OUTLINE) {
            taskPrompt = `
              任务：【分卷剧情拆解 (Volume Breakdown)】
@@ -505,22 +610,28 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
              
              目标：**基于分卷梗概**，将接下来的剧情拆解为 ${count} 个具体的“剧情事件点 (PLOT)”。
              
-             **核心纠正（重要）：**
-             1. **【禁止续写，必须拆解】**：你的任务不是写分卷大纲结局之后发生了什么，而是**把分卷大纲里的内容切分成小块**。
+             **核心规则（重要 - 必须执行）：**
+             1. **【战力与境界校验】(CRITICAL)**：
+                - 每个剧情点 summary 必须明确注明主角**当前的境界/等级** (例如：[练气三层] 或 [S级初期])。
+                - 如果剧情涉及战斗，必须符合逻辑：
+                  * 严禁在无理由的情况下跨大境界杀敌。
+                  * 如果需要跨阶战斗，必须在剧情中说明依靠了什么**具体资源、金手指或外挂** (例如：消耗了X符箓，使用了Y神器)。
+                - 如果剧情包含境界突破，必须明确写出：“主角在此处突破至[新境界]”。
+             2. **【禁止续写，必须拆解】**：你的任务不是写分卷大纲结局之后发生了什么，而是**把分卷大纲里的内容切分成小块**。
                 - 如果分卷大纲是“主角攻打魔教”，那么这 ${count} 个Plot必须涵盖“集结人马 -> 攻破山门 -> 苦战护法 -> 决战教主”的全过程。
                 - 必须覆盖分卷的【起、承、转、合】。
-             2. **颗粒度要求**：每个 PLOT 节点代表一个具体的【场景/关卡】（例如：潜入藏经阁、密林遭遇战）。
-             3. **格式要求（流水账）**：在 summary 中，必须列出该场景内发生的 3-5 个具体动作（Action Beats）。
+             3. **颗粒度要求**：每个 PLOT 节点代表一个具体的【场景/关卡】（例如：潜入藏经阁、密林遭遇战）。
+             4. **格式要求（流水账）**：在 summary 中，必须列出该场景内发生的 3-5 个具体动作（Action Beats）。
                 - 不要写心理描写！不要写对话！
                 - 格式范例：
-                  * 主角到达[地点]。
-                  * 遭遇[敌人]。
-                  * 使用[招式]击败敌人。
+                  * [境界：练气七层] 主角到达[地点]。
+                  * 遭遇[强敌:筑基期妖兽]。
+                  * [金手指] 开启狂暴模式，勉强击退妖兽。
                   * 获得[物品]。
-             4. **人物完备性**：如果在该剧情中会出现任何【有名字】的角色（包括配角、反派），必须在此处明确列出。后续正文写作严禁凭空增加有名字的新人物（路人甲乙除外）。
+             5. **人物完备性**：如果在该剧情中会出现任何【有名字】的角色（包括配角、反派），必须在此处明确列出。后续正文写作严禁凭空增加有名字的新人物（路人甲乙除外）。
            `;
       } 
-      // CASE 3: PLOT -> CHAPTER
+      // CASE 3: PLOT -> CHAPTER (UPDATED FOR REALM CONSISTENCY)
       else if (currentNode.type === NodeType.PLOT) {
           const words = expansionConfig?.wordCount || '3000';
           
@@ -534,12 +645,13 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
             目标：将上述【剧情详纲】中的事件，**无遗漏、无新增**地分配到接下来的 ${count} 个“章节 (CHAPTER)”中。
             
             **核心要求：**
-            1. **总量守恒**：这 ${count} 章的所有事件加起来，必须严格等于【剧情详纲】的内容。
+            1. **【境界一致性】**：章节细纲必须严格遵守详纲中设定的主角境界。如果详纲提到“突破”，章节中必须包含突破过程。
+            2. **总量守恒**：这 ${count} 章的所有事件加起来，必须严格等于【剧情详纲】的内容。
                - 如果详纲有6个事件，分2章，则每章分3个事件。
                - **严禁**新增详纲中不存在的关键事件。
                - **严禁**新增详纲中未提及的有名字人物（路人甲/店小二等无名氏除外）。
-            2. **细纲设计**：每个 Chapter 的 Summary 必须是详纲中对应部分的子集。
-            3. **Context Aware**：请注意当前是全书第 ${structuralContext?.globalChapterIndex || '?'} 章。
+            3. **细纲设计**：每个 Chapter 的 Summary 必须是详纲中对应部分的子集。
+            4. **Context Aware**：请注意当前是全书第 ${structuralContext?.globalChapterIndex || '?'} 章。
           `;
       }
   } else if (task === 'CONTINUE') {

@@ -1,122 +1,90 @@
-
 export enum NodeType {
-  ROOT = 'ROOT',
-  OUTLINE = 'OUTLINE',
-  PLOT = 'PLOT',
-  CHAPTER = 'CHAPTER',
-  CHARACTER = 'CHARACTER',
-  ITEM = 'ITEM',
-  LOCATION = 'LOCATION', // New: Maps, Dungeons
-  FACTION = 'FACTION'    // New: Sects, Organizations
+    ROOT = 'ROOT',
+    OUTLINE = 'OUTLINE',
+    PLOT = 'PLOT',
+    CHAPTER = 'CHAPTER',
+    CHARACTER = 'CHARACTER',
+    ITEM = 'ITEM',
+    LOCATION = 'LOCATION',
+    FACTION = 'FACTION'
 }
 
-export type ViewMode = 'story' | 'resource';
-
 export interface NodeData {
-  id: string;
-  type: NodeType;
-  title: string;
-  summary: string;
-  content: string; // The specific content based on type (Worldview, Detailed Outline, Detailed Arc, Prose)
-  x: number;
-  y: number;
-  parentId: string | null;
-  childrenIds: string[];
-  // For chain structure (linked list logic for chapters/plots)
-  prevNodeId?: string | null;
-  
-  // New: Visual state
-  collapsed?: boolean;
-  
-  // New: Resource linking (Characters/Items IDs associated with this node)
-  associations?: string[];
+    id: string;
+    type: NodeType;
+    title: string;
+    summary: string;
+    content: string;
+    x: number;
+    y: number;
+    parentId: string | null;
+    childrenIds: string[];
+    prevNodeId?: string | null;
+    collapsed: boolean;
+    associations?: string[]; // IDs of associated resources
 }
 
 export interface AppSettings {
-  apiKey: string; // Added user input API Key
-  baseUrl: string;
-  modelName: string;
-  temperature: number;
-  systemInstruction: string;
-  novelStyle: string;
-  thinkingBudget: number; // New: Controls how much the model "thinks"
-  
-  // New: Logger callback for deep debugging
-  onLog?: (message: string, type?: 'info' | 'req' | 'res') => void;
+    apiKey: string;
+    baseUrl: string;
+    modelName: string;
+    temperature: number;
+    thinkingBudget: number;
+    novelStyle: string;
+    systemInstruction: string;
+    onLog?: (msg: string, type?: 'req' | 'res' | 'info') => void;
 }
 
 export interface ExpansionConfig {
-    chapterCount: number;
-    wordCount: string;
+    chapterCount?: number;
+    wordCount?: string | number;
 }
 
 export interface MilestoneConfig {
-    totalPoints: number; // e.g. 60 plot points in a volume
-    generateCount: number; // e.g. generate 5 landmarks
+    totalPoints: number;
+    generateCount: number;
 }
 
 export interface AIRequestParams {
-  currentNode: NodeData;
-  parentContext?: NodeData;
-  prevContext?: NodeData;
-  nextContext?: NodeData;
-  globalContext: string; // Plain text context of associated items
-  storyContext?: string; // New: Rolling summary of previous chapters
-  settings: AppSettings;
-  task: 'EXPAND' | 'WRITE' | 'BRAINSTORM' | 'CONTINUE' | 'POLISH' | 'SYNC_LORE' | 'BATCH_CHECK' | 'BATCH_FIX';
-  
-  // New: Structural Context for precise positioning
-  structuralContext?: {
-      volumeIndex?: number;
-      plotIndex?: number;
-      chapterIndex?: number; // Relative to plot
-      globalChapterIndex?: number; // Absolute in book
-      totalWordCountTarget?: number; // For validation
-  };
-
-  // User defined configs for Plot -> Chapter breakdown
-  expansionConfig?: ExpansionConfig;
-  
-  // User defined configs for Outline -> Plot distribution
-  milestoneConfig?: MilestoneConfig;
-  
-  // For Polish task
-  selection?: string;
-  
-  // For Batch tasks
-  batchNodes?: NodeData[];
+    currentNode: NodeData;
+    globalContext: string;
+    settings: AppSettings;
+    task: 'EXPAND' | 'CONTINUE' | 'WRITE';
+    parentContext?: NodeData;
+    prevContext?: NodeData;
+    nextContext?: NodeData;
+    expansionConfig?: ExpansionConfig;
+    milestoneConfig?: MilestoneConfig;
+    structuralContext?: {
+        volumeIndex?: number;
+        plotIndex?: number;
+        chapterIndex?: number;
+        globalChapterIndex?: number;
+    };
+    storyContext?: string;
 }
 
 export interface LogicValidationResult {
     valid: boolean;
+    score: number;
     issues: string[];
     suggestions: string[];
-    score: number;
 }
 
 export interface LoreUpdateSuggestion {
-    targetId: string; // ID of character/item
-    originalSummary: string;
+    targetId: string;
     newSummary: string;
     reason: string;
 }
 
-// New: Result from background analysis
 export interface WorldStateAnalysis {
-    newResources: {
-        type: NodeType;
-        title: string;
-        summary: string;
-    }[];
-    updates: {
-        id: string;
-        newSummary: string;
-        changeLog: string;
-    }[];
+    newResources: { type: string, title: string, summary: string }[];
+    updates: { id: string, newSummary: string, changeLog: string }[];
     mentionedIds: string[];
 }
 
-// --- AUTO DRAFT TYPES ---
+export type ViewMode = 'story' | 'resource';
+
 export interface AutoDraftConfig {
     idea: string; // Core user idea/elements
     volumeCount: number;
@@ -125,6 +93,13 @@ export interface AutoDraftConfig {
     wordCountPerChapter: number;
     minEffectiveLength: number; // NEW: Threshold for "quality check"
     recoveryLogs?: string; // NEW: Paste logs to resume progress
+    
+    // NEW: Plot Analysis Agent Config
+    enablePlotAnalysis?: boolean;
+    pacing?: 'Fast' | 'Normal' | 'Slow'; 
+    
+    // NEW: Outline Mode (Stop before writing full prose)
+    outlineMode?: boolean;
 }
 
 export interface AutoDraftStatus {

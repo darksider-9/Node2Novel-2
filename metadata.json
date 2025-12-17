@@ -1,5 +1,5 @@
 {
-  "name": "NovelWeaver AI (中文版)",
-  "description": "一个基于 Gemini 的可视化小说创作助手。支持节点化大纲管理、剧情推演、章节写作，专为中文网文创作优化。",
+  "name": "NovelWeaver AI",
+  "description": "一个基于人工智能的可视化小说创作助手。支持节点化大纲管理、剧情推演、章节写作，专为中文网文创作优化。",
   "requestFramePermissions": []
 }

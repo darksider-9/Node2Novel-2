@@ -209,7 +209,7 @@ const App: React.FC = () => {
                       }
                   });
 
-                  // 3. Update Associations
+                  // 3. Update Associations (AND BUBBLE UP TO PARENT)
                   if (analysis.mentionedIds.length > 0) {
                       const sourceIndex = updatedNodes.findIndex(n => n.id === sourceNodeId);
                       if (sourceIndex !== -1) {
@@ -219,6 +219,22 @@ const App: React.FC = () => {
                               ...updatedNodes[sourceIndex],
                               associations: newAssoc
                           };
+
+                          // --- PROPAGATION LOGIC START ---
+                          // If current node (Chapter/Plot) has new resources, propagate to Parent (Plot/Outline)
+                          const parentId = updatedNodes[sourceIndex].parentId;
+                          if (parentId) {
+                               const parentIndex = updatedNodes.findIndex(p => p.id === parentId);
+                               if (parentIndex !== -1) {
+                                   const parentAssoc = updatedNodes[parentIndex].associations || [];
+                                   const mergedParentAssoc = Array.from(new Set([...parentAssoc, ...newAssoc]));
+                                   updatedNodes[parentIndex] = {
+                                       ...updatedNodes[parentIndex],
+                                       associations: mergedParentAssoc
+                                   };
+                               }
+                          }
+                          // --- PROPAGATION LOGIC END ---
                       }
                   }
                   
@@ -420,7 +436,29 @@ const App: React.FC = () => {
   };
 
   const handleNodeUpdate = (id: string, updates: Partial<NodeData>) => {
-    setNodes(prev => prev.map(n => n.id === id ? { ...n, ...updates } : n));
+    setNodes(prev => {
+        // 1. Update the target node
+        let nextNodes = prev.map(n => n.id === id ? { ...n, ...updates } : n);
+        
+        // 2. Resource Bubble-up: If associations updated, propagate to Parent
+        if (updates.associations) {
+            const childNode = nextNodes.find(n => n.id === id);
+            if (childNode && childNode.parentId) {
+                // Find parent and merge associations
+                nextNodes = nextNodes.map(n => {
+                    if (n.id === childNode.parentId) {
+                         // Union of parent associations + child associations
+                         const merged = Array.from(new Set([...(n.associations || []), ...(updates.associations || [])]));
+                         return { ...n, associations: merged };
+                    }
+                    return n;
+                });
+            }
+        }
+        return nextNodes;
+    });
+
+    // Background Analysis trigger
     if (updates.content && updates.content.length > (nodes.find(n=>n.id===id)?.content.length || 0) + 50) {
          triggerWorldAnalysis(updates.content, id);
     }
