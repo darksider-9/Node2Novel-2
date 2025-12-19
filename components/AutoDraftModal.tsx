@@ -1,7 +1,7 @@
 
-import React, { useState } from 'react';
-import { AutoDraftConfig } from '../types';
-import { Bot, Play, X, Sliders, FileText, Activity, LayoutTemplate } from 'lucide-react';
+import React, { useState, useRef } from 'react';
+import { AutoDraftConfig, GenerationDepth } from '../types';
+import { Bot, Play, X, Sliders, FileText, Activity, LayoutTemplate, Upload, Layers, ListTree, BookOpen, PenTool } from 'lucide-react';
 
 interface AutoDraftModalProps {
     onStart: (config: AutoDraftConfig) => void;
@@ -19,14 +19,35 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
         recoveryLogs: '',
         enablePlotAnalysis: true,
         pacing: 'Normal',
-        outlineMode: false // Default to full writing
+        targetDepth: 'PROSE' // Default to full generation
     });
     
     const [showRecovery, setShowRecovery] = useState(false);
+    const [fileName, setFileName] = useState<string>('');
+    const fileInputRef = useRef<HTMLInputElement>(null);
 
     // Estimate based on inputs (rough estimate if dynamic is on)
     const totalChapters = config.volumeCount * config.plotPointsPerVolume * config.chaptersPerPlot;
-    const estWordCount = totalChapters * config.wordCountPerChapter;
+
+    const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            setFileName(file.name);
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const text = event.target?.result as string;
+                setConfig({ ...config, recoveryLogs: text });
+            };
+            reader.readAsText(file);
+        }
+    };
+
+    const depths: { id: GenerationDepth; label: string; icon: React.ReactNode; desc: string }[] = [
+        { id: 'OUTLINE', label: '1. 分卷规划', icon: <Layers size={14}/>, desc: '仅生成大副本/分卷结构' },
+        { id: 'PLOT', label: '2. 剧情推演', icon: <ListTree size={14}/>, desc: '生成具体事件流 (Plot)' },
+        { id: 'CHAPTER', label: '3. 章节细纲', icon: <BookOpen size={14}/>, desc: '生成章节标题与摘要' },
+        { id: 'PROSE', label: '4. 全书正文', icon: <PenTool size={14}/>, desc: '撰写完整小说内容' },
+    ];
 
     return (
         <div className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -50,6 +71,30 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
                         该模式将接管控制权，根据世界观自动执行：
                         生成 → 逻辑自检 → 指令优化 → 内容润色 → 下钻生成。
                         <br/>适合项目初期快速搭建骨架和填充正文，也支持中途接管。
+                    </div>
+
+                    {/* Target Depth Selection */}
+                    <div className="space-y-2">
+                        <label className="text-xs font-bold uppercase text-slate-500 flex items-center gap-2">
+                            <LayoutTemplate size={14}/> 生成深度 (Target Depth)
+                        </label>
+                        <div className="grid grid-cols-2 gap-2">
+                            {depths.map(d => (
+                                <button
+                                    key={d.id}
+                                    onClick={() => setConfig({...config, targetDepth: d.id})}
+                                    className={`p-3 rounded-lg border text-left transition relative overflow-hidden ${config.targetDepth === d.id ? 'bg-indigo-900/40 border-indigo-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-750'}`}
+                                >
+                                    <div className="flex items-center gap-2 mb-1 text-xs font-bold">
+                                        {d.icon} {d.label}
+                                    </div>
+                                    <div className="text-[9px] opacity-70">{d.desc}</div>
+                                    {config.targetDepth === d.id && (
+                                        <div className="absolute top-0 right-0 w-3 h-3 bg-indigo-500 rounded-bl-lg"></div>
+                                    )}
+                                </button>
+                            ))}
+                        </div>
                     </div>
 
                     {/* Plot Analysis Agent Section */}
@@ -88,22 +133,6 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
                             </div>
                         )}
                     </div>
-                    
-                    {/* NEW: Outline Mode Toggle */}
-                    <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 flex items-center justify-between">
-                         <div className="flex flex-col gap-1">
-                            <label className="text-xs font-bold uppercase text-amber-400 flex items-center gap-2">
-                                <LayoutTemplate size={14}/> 大纲模式 (Outline Only)
-                            </label>
-                            <span className="text-[10px] text-slate-400">仅生成到章节细纲，不撰写正文。适合快速验证故事结构。</span>
-                         </div>
-                         <input 
-                            type="checkbox" 
-                            checked={config.outlineMode} 
-                            onChange={e => setConfig({...config, outlineMode: e.target.checked})}
-                            className="w-4 h-4 rounded border-slate-600 text-amber-600 focus:ring-amber-500 bg-slate-700"
-                        />
-                    </div>
 
                     <div>
                         <label className="block text-xs font-bold uppercase text-slate-500 mb-2">核心创意/融入元素</label>
@@ -136,7 +165,7 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
                     
                     <div className="flex justify-between items-center text-xs text-slate-400 font-mono bg-black/20 p-2 rounded">
                         <span>估算总量: ~{totalChapters} 章</span>
-                        <span>{config.outlineMode ? '(不生成正文)' : (config.enablePlotAnalysis ? '(动态调整)' : '')}</span>
+                        <span>{config.targetDepth !== 'PROSE' ? '(不生成正文)' : (config.enablePlotAnalysis ? '(动态调整)' : '')}</span>
                     </div>
                     
                     {/* Recovery Section */}
@@ -145,18 +174,30 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
                             onClick={() => setShowRecovery(!showRecovery)} 
                             className="flex items-center gap-2 text-xs text-slate-500 hover:text-white transition w-full"
                         >
-                            <FileText size={14}/> {showRecovery ? '隐藏故障恢复' : '故障恢复 / 日志续点'}
+                            <FileText size={14}/> {showRecovery ? '隐藏恢复选项' : '上传之前的日志续点 (.txt)'}
                         </button>
                         
                         {showRecovery && (
-                            <div className="mt-3 animate-in slide-in-from-top-2">
-                                <label className="block text-[10px] text-slate-500 mb-1">粘贴之前的运行日志 (Logs) 以跳过已完成的步骤：</label>
-                                <textarea 
-                                    value={config.recoveryLogs}
-                                    onChange={e => setConfig({...config, recoveryLogs: e.target.value})}
-                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-[10px] text-slate-400 font-mono focus:border-indigo-500 focus:outline-none h-24 resize-none leading-tight"
-                                    placeholder="[12:00:00] [智能审计] 节点 XXX 质量达标 (PASS)..."
+                            <div className="mt-3 p-4 bg-slate-950/50 border border-dashed border-slate-700 rounded-xl text-center animate-in slide-in-from-top-2">
+                                <input 
+                                    type="file" 
+                                    ref={fileInputRef} 
+                                    onChange={handleFileUpload} 
+                                    accept=".txt" 
+                                    className="hidden" 
                                 />
+                                <button 
+                                    onClick={() => fileInputRef.current?.click()} 
+                                    className="flex flex-col items-center gap-2 w-full hover:opacity-80 transition"
+                                >
+                                    <Upload className="text-indigo-400" size={24}/>
+                                    <span className="text-xs text-slate-400">{fileName || "点击上传日志文件"}</span>
+                                </button>
+                                {config.recoveryLogs && (
+                                    <div className="mt-2 text-[10px] text-emerald-400 font-mono truncate max-w-full">
+                                        日志已加载 (长度: {config.recoveryLogs.length})
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
@@ -165,7 +206,7 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
                         onClick={() => onStart(config)}
                         className="w-full py-3 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold rounded-xl shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2 transition"
                     >
-                        <Play size={18} fill="currentColor" /> {config.recoveryLogs ? '恢复进度并启动' : (config.outlineMode ? '启动大纲生成器' : '启动自动化引擎')}
+                        <Play size={18} fill="currentColor" /> {config.recoveryLogs ? '恢复进度并启动' : '启动自动化引擎'}
                     </button>
                 </div>
             </div>

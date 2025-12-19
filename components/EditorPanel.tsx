@@ -1,8 +1,8 @@
 
 import React, { useState } from 'react';
 import { NodeData, NodeType, AppSettings, LogicValidationResult, LoreUpdateSuggestion } from '../types';
-import { Sparkles, X, Trash2, BookOpen, FileText, ShieldCheck, AlertTriangle, Wand2, RefreshCw, Link as LinkIcon, UserPlus, ArrowRightCircle, ListTree, GitMerge, Layout, Globe, PenTool, Hash, ArrowLeft, BrainCircuit, Type as TypeIcon } from 'lucide-react';
-import { generateChapterContent, generateNodeExpansion, validateStoryLogic, refineContent, extractLoreUpdates, generateRefinementPrompt } from '../services/geminiService';
+import { Sparkles, X, Trash2, BookOpen, FileText, ShieldCheck, AlertTriangle, Wand2, RefreshCw, Link as LinkIcon, UserPlus, ArrowRightCircle, ListTree, GitMerge, Layout, Globe, PenTool, Hash, ArrowLeft, BrainCircuit, Type as TypeIcon, SearchCheck, Layers, PlusCircle, CheckCircle } from 'lucide-react';
+import { generateChapterContent, generateNodeExpansion, validateStoryLogic, refineContent, extractLoreUpdates, generateRefinementPrompt, analyzeAndGenerateFix, analyzeContentCoverage } from '../services/geminiService';
 import { NODE_COLORS, HIERARCHY_RULES } from '../constants';
 
 interface EditorPanelProps {
@@ -33,6 +33,9 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
 
   const [showAssociator, setShowAssociator] = useState(false);
   const [loreUpdates, setLoreUpdates] = useState<LoreUpdateSuggestion[]>([]);
+  
+  // NEW: Coverage Analysis Result State
+  const [coverageResult, setCoverageResult] = useState<{ missingNodes: { title: string, summary: string, insertAfterId: string | null }[] } | null>(null);
 
   // Config for PLOT -> CHAPTER
   const [chapterCount, setChapterCount] = useState(3);
@@ -47,6 +50,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
   const parent = node.parentId ? nodes.find(n => n.id === node.parentId) : null;
   const prevNode = node.prevNodeId ? nodes.find(n => n.id === node.prevNodeId) : null;
   const nextNode = nodes.find(n => n.prevNodeId === node.id);
+  const children = nodes.filter(n => n.parentId === node.id); // For coverage check
   
   // Safe access for colors
   const colors = NODE_COLORS[node.type] || NODE_COLORS[NodeType.PLOT];
@@ -74,6 +78,62 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
   };
 
   // ---------------- Handlers ----------------
+
+  // NEW: Content Coverage Analysis
+  const handleCoverageAnalysis = async () => {
+      if (children.length === 0) {
+          alert("该功能仅在已有子节点时可用，用于检查子节点内容是否全面覆盖了父级大纲。");
+          return;
+      }
+      setGlobalLoading(true);
+      try {
+          const result = await analyzeContentCoverage(node, children, settings);
+          if (result.missingNodes.length === 0) {
+              alert("分析完成：子节点已完美覆盖父级内容！");
+          } else {
+              // Show Modal instead of confirm
+              setCoverageResult(result);
+          }
+      } catch (e) {
+          alert("分析失败");
+      } finally {
+          setGlobalLoading(false);
+      }
+  };
+
+  const handleApplyCoverageFix = () => {
+      if (!coverageResult) return;
+      coverageResult.missingNodes.forEach(missing => {
+          if (missing.insertAfterId) {
+              onAddSibling(missing.insertAfterId, { title: missing.title, summary: missing.summary });
+          } else {
+              onAddChildren(node.id, [{ title: missing.title, summary: missing.summary }]);
+          }
+      });
+      setCoverageResult(null);
+  };
+
+  // NEW: Chapter Outline Optimization
+  const handleOptimizeChapterOutline = async () => {
+      setGlobalLoading(true);
+      try {
+          const context = getContext();
+          const instruction = await analyzeAndGenerateFix(node, context, "", 2000, "", settings);
+          
+          if (instruction.includes("PASS")) {
+              alert("当前章节细纲已符合高质量标准，无需修改。");
+              return;
+          }
+          
+          // Apply fix
+          const rawResult = await refineContent(node.summary, instruction, settings, context);
+          onUpdate(node.id, { summary: rawResult.trim() });
+      } catch (e) {
+          alert("优化失败");
+      } finally {
+          setGlobalLoading(false);
+      }
+  };
 
   const handleExpand = async () => {
     setGlobalLoading(true);
@@ -226,8 +286,49 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
   const isResourceNode = [NodeType.CHARACTER, NodeType.ITEM, NodeType.LOCATION, NodeType.FACTION].includes(node.type);
 
   return (
-    <div className="w-[500px] flex flex-col bg-slate-900 border-l border-slate-800 h-full shadow-2xl z-30">
+    <div className="w-[500px] flex flex-col bg-slate-900 border-l border-slate-800 h-full shadow-2xl z-30 relative">
       
+      {/* Coverage Report Modal */}
+      {coverageResult && (
+          <div className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-indigo-500/50 rounded-xl w-full max-w-md shadow-2xl animate-in fade-in zoom-in duration-200">
+                  <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-indigo-900/20 rounded-t-xl">
+                       <div className="flex items-center gap-2 text-indigo-100 font-bold">
+                           <SearchCheck size={18} /> 剧情覆盖率分析报告
+                       </div>
+                       <button onClick={() => setCoverageResult(null)}><X size={18} className="text-slate-500 hover:text-white"/></button>
+                  </div>
+                  
+                  <div className="p-4 max-h-[60vh] overflow-y-auto custom-scrollbar space-y-3">
+                       <div className="text-xs text-slate-400 bg-slate-950 p-3 rounded border border-slate-800 leading-relaxed">
+                           AI 发现当前子节点序列中存在 <strong className="text-amber-400">{coverageResult.missingNodes.length}</strong> 处潜在的剧情断层或内容缺失。建议插入以下节点以完善逻辑：
+                       </div>
+                       
+                       {coverageResult.missingNodes.map((item, idx) => (
+                           <div key={idx} className="bg-slate-800/50 border border-slate-700 p-3 rounded-lg relative hover:bg-slate-800 transition">
+                               <div className="absolute top-2 right-2 text-[10px] bg-slate-700 px-2 py-0.5 rounded text-slate-300">
+                                   {item.insertAfterId ? '插入位置: 指定节点后' : '插入位置: 序列开头'}
+                               </div>
+                               <div className="font-bold text-emerald-400 text-sm mb-1.5 flex items-center gap-2">
+                                   <PlusCircle size={14}/> {item.title}
+                               </div>
+                               <div className="text-xs text-slate-300 leading-relaxed opacity-90">
+                                   {item.summary}
+                               </div>
+                           </div>
+                       ))}
+                  </div>
+                  
+                  <div className="p-4 border-t border-slate-800 flex gap-3 bg-slate-950/50 rounded-b-xl">
+                      <button onClick={() => setCoverageResult(null)} className="flex-1 py-2 text-xs text-slate-400 hover:text-white transition bg-slate-800 hover:bg-slate-700 rounded-lg">忽略建议</button>
+                      <button onClick={handleApplyCoverageFix} className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 shadow-lg shadow-indigo-900/20">
+                          <CheckCircle size={14} /> 一键自动插入 ({coverageResult.missingNodes.length})
+                      </button>
+                  </div>
+              </div>
+          </div>
+      )}
+
       {/* Header */}
       <div className={`p-4 border-b border-slate-800 flex justify-between items-center ${colors.bg}`}>
          <div className="flex-1">
@@ -310,6 +411,16 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
                     )}
                 </div>
 
+                {/* NEW: Coverage Check Button (Visible if has children) */}
+                {children.length > 0 && (
+                    <button 
+                        onClick={handleCoverageAnalysis} 
+                        className="w-full py-2.5 bg-indigo-900/30 hover:bg-indigo-900/50 border border-indigo-800 text-indigo-300 rounded-lg flex items-center justify-center gap-2 text-xs transition"
+                    >
+                        <SearchCheck size={16} /> 智能内容覆盖率分析 (审计断层)
+                    </button>
+                )}
+
                 {/* 2. Context / Associations */}
                 {!isResourceNode && node.type !== NodeType.ROOT && (
                     <div className="space-y-2">
@@ -376,6 +487,10 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
                                  <div className="text-[10px] font-bold text-amber-500 uppercase flex items-center gap-1">
                                      <Sparkles size={12}/> 核心写作 (AI Writer)
                                  </div>
+                                 {/* NEW: Outline Optimizer */}
+                                 <button onClick={handleOptimizeChapterOutline} className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 py-2 rounded-lg text-xs text-blue-400 flex justify-center gap-2 transition">
+                                     <Layers size={14} /> 一键优化本章细纲
+                                 </button>
                                  <div className="text-[10px] text-slate-400 mb-2">
                                      {prevNode ? `将自动衔接前章: ${prevNode.title}` : '当前为首章'}
                                  </div>

@@ -161,10 +161,6 @@ export class AutoDraftAgent {
         // Pattern: [智能审计] 节点 TITLE 质量达标 (PASS)。
         const passRegex = /\[智能审计\] 节点 (.*?) 质量达标 \(PASS\)/;
         
-        // 2. Recover completed resource syncs
-        // Pattern: [资源同步] 正在处理节点 TITLE 的资源状态... (implies intent, but "完成" is better)
-        // Actually, just trusting PASS for structure nodes is the biggest win.
-        
         lines.forEach(line => {
             const match = line.match(passRegex);
             if (match && match[1]) {
@@ -193,11 +189,6 @@ export class AutoDraftAgent {
         const node = allNodes.find(n => n.id === nodeId);
         const parent = allNodes.find(n => n.id === parentId);
         if (!node || !parent) return;
-
-        // Optimization: If already validated in session (recovered from log), skip resource sync to save tokens?
-        // Risky if resource sync failed but validation passed. 
-        // Safer: Just perform it. Or check if resources are already detailed.
-        // For now, we perform it as it's less expensive than full generation.
 
         this.log(`[资源同步] 正在处理节点 ${node.title} 的资源状态...`);
 
@@ -561,7 +552,6 @@ export class AutoDraftAgent {
     
     public async start(rootNodeId: string) {
         this.stopSignal = false;
-        // Reset cache at start of a new run
         this.validatedSessionIds.clear();
         
         // Recover state from logs if provided
@@ -574,9 +564,8 @@ export class AutoDraftAgent {
             if (this.config.enablePlotAnalysis) {
                 this.log(`已启用智能情节设计 Agent (节奏: ${this.config.pacing || 'Normal'})`);
             }
-            if (this.config.outlineMode) {
-                this.log(`🔥 已开启【大纲模式】：将跳过正文撰写，仅生成剧情细纲。`);
-            }
+            // Use targetDepth instead of outlineMode
+            this.log(`🔥 生成目标层级: ${this.config.targetDepth} (OUTLINE=分卷, PLOT=剧情, CHAPTER=细纲, PROSE=正文)`);
             
             // --- PHASE 1: STRUCTURE & SKELETON (Breadth-First Validation) ---
             this.log("=== 阶段一：全书骨架铺设与校验 ===");
@@ -587,23 +576,17 @@ export class AutoDraftAgent {
                 await this.optimizeNode(rootNodeId, 1000);
                 await this.expansionPhase(rootNodeId, 1000);
                 
-                // [Root Resource Init] - Assume root creates initial resources.
-                // We do an extraction here just in case.
+                // [Root Resource Init]
                 this.log(">> 正在初始化世界观资源库...");
                 await this.manageResourceLifecycle(rootNodeId, rootNodeId); 
                 
-                this.validatedSessionIds.add(rootNodeId); // Mark root as good
+                this.validatedSessionIds.add(rootNodeId); 
             } else {
                 this.log(">> [跳过] 核心世界观已在日志中确认达标。");
             }
 
             // 2. Ensure ALL Volumes exist
-            // Dynamic Count Check
             let targetVolumeCount = this.config.volumeCount;
-            /* 
-               Usually Volume count is user defined, AI shouldn't change book length easily. 
-               Skipping dynamic count for Volumes to respect user scope. 
-            */
             const volumeIds = await this.ensureChildren(rootNodeId, NodeType.OUTLINE, targetVolumeCount);
             
             // 3. Process ALL Volumes (Structure Check + RESOURCE SYNC)
@@ -627,6 +610,13 @@ export class AutoDraftAgent {
                 await this.manageResourceLifecycle(volId, rootNodeId);
 
                 this.validatedSessionIds.add(volId); // Mark volume as good
+            }
+
+            // --- DEPTH CHECK: OUTLINE ---
+            if (this.config.targetDepth === 'OUTLINE') {
+                this.log("✅ 已达到目标深度：分卷规划 (OUTLINE)。任务完成。");
+                this.setStatus({ isActive: false, currentStage: '完成 (分卷规划)', progress: 100, logs: [...this.logHistory] });
+                return;
             }
 
             // 4. Process ALL Plots (for ALL Volumes)
@@ -683,6 +673,13 @@ export class AutoDraftAgent {
                 }
             }
 
+            // --- DEPTH CHECK: PLOT ---
+            if (this.config.targetDepth === 'PLOT') {
+                this.log("✅ 已达到目标深度：剧情推演 (PLOT)。任务完成。");
+                this.setStatus({ isActive: false, currentStage: '完成 (剧情推演)', progress: 100, logs: [...this.logHistory] });
+                return;
+            }
+
             // 5. Ensure ALL Chapters exist (Placeholders)
             this.log(">> 正在初始化全书章节占位符...");
             let tempGlobalChapterIdx = 0;
@@ -699,7 +696,6 @@ export class AutoDraftAgent {
                     // DYNAMIC AGENT: Consult Structural Architect for Chapter Count
                     let targetChapCount = this.config.chaptersPerPlot;
                     if (this.config.enablePlotAnalysis && plotNode) {
-                         // We log less frequently here to avoid spam
                          const advice = await consultStructuralArchitect(
                             plotNode,
                             NodeType.CHAPTER,
@@ -707,7 +703,6 @@ export class AutoDraftAgent {
                             targetChapCount,
                             this.settings
                          );
-                         // this.log(`[章节规划] ${plotNode.title} -> ${advice.count} 章`);
                          targetChapCount = advice.count;
                     }
 
@@ -726,7 +721,15 @@ export class AutoDraftAgent {
                 }
             }
 
+            // --- DEPTH CHECK: CHAPTER (OUTLINE) ---
+            if (this.config.targetDepth === 'CHAPTER') {
+                this.log("✅ 已达到目标深度：章节细纲 (CHAPTER OUTLINE)。跳过正文撰写。");
+                this.setStatus({ isActive: false, currentStage: '完成 (章节细纲)', progress: 100, logs: [...this.logHistory] });
+                return;
+            }
+
             // --- PHASE 2: WRITING PROSE (Depth-First Execution) ---
+            // Only proceeds if targetDepth === 'PROSE'
             
             this.log("=== 阶段二：全书正文撰写与精修 ===");
             
@@ -757,25 +760,14 @@ export class AutoDraftAgent {
                             continue;
                         }
 
-                        // Ancestry Audit (Will rely on cache for speed)
-                        // this.log(`[依赖检查] 正在递归效验 ${chapNode?.title} 的父级...`);
                         await this.auditAncestry(chapId);
 
                         // --- WRITING PIPELINE ---
-                        // CONDITIONAL LOGIC FOR OUTLINE MODE
-                        if (!this.config.outlineMode) {
-                            await this.writeChapter(chapId, i+1, j+1, k+1);
-                            await this.optimizeNode(chapId, this.config.wordCountPerChapter, this.globalChapterCounter);
-                            await this.expansionPhase(chapId, this.config.wordCountPerChapter);
-                            await this.ensureChapterEnding(chapId);
-                        } else {
-                            // In Outline Mode, we might want to ensure the "summary" (fine outline) is good,
-                            // but we skip the "content" (prose) generation.
-                            this.log(`[大纲模式] 跳过正文撰写: ${chapNode?.title}`);
-                            // Optional: Ensure content mirrors summary for export readability
-                            this.updateNode(chapId, { content: chapNode?.summary }); 
-                            await delay(100);
-                        }
+                        // We are already in PROSE mode if we are here
+                        await this.writeChapter(chapId, i+1, j+1, k+1);
+                        await this.optimizeNode(chapId, this.config.wordCountPerChapter, this.globalChapterCounter);
+                        await this.expansionPhase(chapId, this.config.wordCountPerChapter);
+                        await this.ensureChapterEnding(chapId);
                         
                         // Mark chapter as done in cache (optional)
                         this.validatedSessionIds.add(chapId);
@@ -958,13 +950,6 @@ export class AutoDraftAgent {
                 if (fillData.length > 0) {
                     const newIds = this.addNodesToState(parentId, fillData, startId); // Insert after startId
                     await this.waitForNodes(newIds);
-                    
-                    // We need to update our local list to ensure correct order?
-                    // Actually, 'addNodesToState' handles linking prevNodeId.
-                    // But 'currentIds' array is stale. We don't need to update it for the loop logic 
-                    // because we are processing pairs (i, i+1) which are the ORIGINAL keyframes.
-                    // K1 -> [New...] -> K2.  Next loop: K2 -> [New...] -> K3.
-                    // This is correct.
                 }
                 
                 await delay(1000);
@@ -974,12 +959,6 @@ export class AutoDraftAgent {
         // Return all children of parent, sorted
         const finalParent = this.getNodes().find(n => n.id === parentId);
         const allChildren = this.getNodes().filter(n => finalParent?.childrenIds.includes(n.id) && n.type === NodeType.PLOT);
-        // Simple sort by Y? Or follow prevNode chain? 
-        // addNodesToState updates Y position linearly if sequential. 
-        // But here we inserted. We might need a re-layout trigger or just return IDs.
-        // The App's layout engine handles Y based on tree order or just linked list?
-        // App.tsx uses 'tree' order from childrenIds array.
-        // addNodesToState updates childrenIds array correctly (splice or push).
         
         return allChildren.map(n => n.id);
     }
@@ -1173,11 +1152,6 @@ export class AutoDraftAgent {
                 const lastNewId = ids[ids.length - 1];
                 updated = updated.map(n => n.id === nextId ? { ...n, prevNodeId: lastNewId } : n);
             }
-
-            // 3. Shift following nodes down (Layout)
-            // Ideally we run a full layout pass, but let's shift locally if possible.
-            // For now, rely on standard layout or just simple stack.
-            // The 'setNodes' in App.tsx calls 'updateLayout', so strict Y coord here is temporary hint.
             
             return [...updated, ...newNodes];
         });

@@ -87,6 +87,8 @@ export interface WorldStateAnalysis {
 
 export type ViewMode = 'story' | 'resource';
 
+export type GenerationDepth = 'OUTLINE' | 'PLOT' | 'CHAPTER' | 'PROSE';
+
 export interface AutoDraftConfig {
     idea: string; // Core user idea/elements
     volumeCount: number;
@@ -100,8 +102,8 @@ export interface AutoDraftConfig {
     enablePlotAnalysis?: boolean;
     pacing?: 'Fast' | 'Normal' | 'Slow'; 
     
-    // NEW: Outline Mode (Stop before writing full prose)
-    outlineMode?: boolean;
+    // NEW: Generation Depth Control
+    targetDepth: GenerationDepth;
 }
 
 export interface AutoDraftStatus {

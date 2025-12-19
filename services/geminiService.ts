@@ -117,6 +117,52 @@ const callOpenAI = async (
     return queueResult;
 };
 
+// --- NEW AGENT: Content Coverage Analyzer ---
+/**
+ * 核心功能：内容覆盖率分析 Agent
+ * 分析父节点内容是否已被子节点完全覆盖，并建议缺失的子节点。
+ */
+export const analyzeContentCoverage = async (
+    parent: NodeData,
+    children: NodeData[],
+    settings: AppSettings
+): Promise<{ missingNodes: { title: string, summary: string, insertAfterId: string | null }[] }> => {
+    const childrenText = children.map((c, i) => `[节点 ${i + 1} ID:${c.id}] ${c.title}: ${c.summary}`).join('\n');
+    
+    const prompt = `
+        角色：【网文逻辑审计师】
+        任务：对比“父级总纲”与“已生成的子节点列表”，检查是否存在剧情断层或内容缺失。
+        
+        【父级总纲】：${parent.title} - ${parent.summary}
+        
+        【当前已有的子节点列表】：
+        ${childrenText}
+        
+        **分析原则**：
+        1. **覆盖率检查**：父级总纲中提到的每一个关键事件、冲突、转折点，是否都在子节点中得到了体现？
+        2. **逻辑连续性**：相邻子节点之间是否存在明显的逻辑跳跃（例如从A地直接跳到了B地，但中间没有任何过程描述）？
+        3. **非重复性**：不要对已经有的节点进行改动，只寻找缺失的部分。
+        
+        **输出要求**：
+        - 如果发现父级中有内容未被子级覆盖，请生成新的子节点来填补空隙。
+        - 明确指出新节点应该插入在哪个已有节点 ID 之后（insertAfterId）。如果是插在开头，该值为 null。
+        - 仅输出确实缺失的部分。如果没有缺失，返回空数组。
+
+        **Output JSON Format Required:**
+        { 
+          "missingNodes": [ 
+            { "title": "string", "summary": "string", "insertAfterId": "string_or_null" } 
+          ] 
+        }
+    `;
+
+    try {
+        const text = await callOpenAI([{ role: "user", content: prompt }], settings, true);
+        return JSON.parse(text);
+    } catch (e) {
+        return { missingNodes: [] };
+    }
+};
 
 // --- 1. Initialization & System ---
 
@@ -451,13 +497,20 @@ export const analyzeAndGenerateFix = async (
         case NodeType.ROOT:
             role = "世界观架构师";
             focus = `
+            【Root层核心设定审计增量规则 (Strict)】：
+            1. **增量原则**：除非用户要求，严禁删减原有的背景、力量体系、势力或人物设定。只能在原有基础上补充。
+
+            `;
+            focus = `
             【Root层审查重点 (Strict)】：
             1. **主线宏愿 (Main Arc)**：必须包含一条清晰、完整的故事主线链条（从开端到终局）。
                - 错误：只写了主角要变强。
-               - 正确：主角要变强 -> 寻找X神器 -> 揭开Y秘密 -> 击败Z反派 -> 重塑世界。
+               - 正确：主角要变强 -> 寻找X神器 -> 揭开Y秘密 -> 击败Z反派 -> 拯救世界。
             2. **力量体系**：等级划分是否清晰且具有吸引力？
             3. **核心爽点**：是否符合"${settings.novelStyle}"流派？
-            4. **【增量原则】**：除非用户明确要求删除，否则严禁删减原有的设定（如人物、势力、背景）。只能在原有基础上进行补充或修正。
+            4. **明确主线设计**：主线必须具备清晰的【时间线】（事件先后逻辑）和【区域空间轨迹】（主角从哪到哪，最后的事件在哪里）。
+            5. **落幕高潮**：必须明确设计全书的【最后落幕事件】。这是全书的最高潮，标志着主线宏愿的完成，严禁含糊其辞。
+            6. **【增量原则】**：除非用户明确要求删除，否则严禁删减原有的设定（如人物、势力、背景）。只能在原有基础上进行补充或修正。
             `;
             break;
         case NodeType.OUTLINE:
