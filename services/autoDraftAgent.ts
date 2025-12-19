@@ -560,7 +560,7 @@ export class AutoDraftAgent {
         }
         
         try {
-            this.log("启动全自动创作引擎 (广度优先模式)...");
+            this.log("启动全自动创作引擎 (优化加强版)...");
             if (this.config.enablePlotAnalysis) {
                 this.log(`已启用智能情节设计 Agent (节奏: ${this.config.pacing || 'Normal'})`);
             }
@@ -586,11 +586,13 @@ export class AutoDraftAgent {
             }
 
             // 2. Ensure ALL Volumes exist
+            // UPGRADE: Use Spanning Generation for Volume Structure (Head & Tail) if count >= 3
+            this.log(">> 正在规划全书分卷结构 (Head/Tail Strategy)...");
             let targetVolumeCount = this.config.volumeCount;
             const volumeIds = await this.ensureChildren(rootNodeId, NodeType.OUTLINE, targetVolumeCount);
             
             // 3. Process ALL Volumes (Structure Check + RESOURCE SYNC)
-            this.log(`>> 正在校验 ${volumeIds.length} 个分卷大纲...`);
+            this.log(`>> 正在优化 ${volumeIds.length} 个分卷大纲...`);
             for (const volId of volumeIds) {
                 if (this.stopSignal) break;
                 
@@ -641,7 +643,7 @@ export class AutoDraftAgent {
                     targetPlotCount = advice.count;
                 }
 
-                // Ensure Plots exist
+                // Ensure Plots exist (UPGRADE: uses Keyframe Strategy if count >= 5)
                 const plotIds = await this.ensureChildren(volId, NodeType.PLOT, targetPlotCount, { volumeIndex: i + 1 });
                 
                 // DYNAMIC AGENT: Pacing Check (Gap Filling)
@@ -813,10 +815,10 @@ export class AutoDraftAgent {
         const parent = this.getNodes().find(n => n.id === parentId);
         if (!parent) return [];
 
-        // Special Strategy for PLOT Nodes: Keyframe + Infill
-        // Only trigger if we are asking for a significant number (e.g. > 8), otherwise linear is fine.
-        if (type === NodeType.PLOT && totalTargetCount >= 8) {
-             return this.generatePlotKeyframesAndFill(parentId, totalTargetCount, context);
+        // UPGRADE: Special Strategy for PLOT Nodes (>=5) AND OUTLINE Nodes (>=3)
+        // Applies "Head & Tail" Strategy
+        if ((type === NodeType.PLOT && totalTargetCount >= 5) || (type === NodeType.OUTLINE && totalTargetCount >= 3)) {
+             return this.generateKeyframesAndFill(parentId, type, totalTargetCount, context);
         }
 
         const existing = this.getNodes().filter(n => parent.childrenIds.includes(n.id) && n.type === type);
@@ -862,21 +864,26 @@ export class AutoDraftAgent {
         return createdIds;
     }
 
-    // NEW: Keyframe Strategy for Plot Points
-    private async generatePlotKeyframesAndFill(
+    // RENAMED & UPGRADED: Generic Keyframe Strategy for Volume & Plot
+    private async generateKeyframesAndFill(
         parentId: string,
+        type: NodeType,
         totalTargetCount: number,
         context: any
     ): Promise<string[]> {
         const parent = this.getNodes().find(n => n.id === parentId)!;
+        const typeLabel = type === NodeType.OUTLINE ? '分卷(Outline)' : '剧情点(Plot)';
         
-        // 1. Generate ~5 Keyframes spanning the volume
-        this.log(`[结构生成] 正在规划分卷 "${parent.title}" 的关键锚点 (Keyframes)...`);
+        // 1. Generate Keyframes spanning the container
+        this.log(`[结构生成] 正在规划 "${parent.title}" 的关键节点骨架 (Keyframes for ${typeLabel})...`);
         
-        const keyframeCount = 5;
+        // Use 3 keyframes for Volumes, 5 for Plots typically
+        const keyframeCount = type === NodeType.OUTLINE ? 3 : 5;
+        const actualKeyframeCount = Math.min(totalTargetCount, keyframeCount);
+
         const keyframeConfig: MilestoneConfig = { 
             totalPoints: totalTargetCount, 
-            generateCount: keyframeCount,
+            generateCount: actualKeyframeCount,
             strategy: 'spanning' 
         };
 
@@ -897,13 +904,8 @@ export class AutoDraftAgent {
         await this.waitForNodes(ids);
 
         // 2. Infill Gaps
-        // Current state: [K1, K2, K3, K4, K5]
+        // Current state: [K1, K2, K3...]
         // We need to fill between them to reach totalTargetCount.
-        
-        // Calculate needed nodes per interval
-        // Intervals = keyframesData.length - 1
-        // Remaining = totalTargetCount - keyframesData.length
-        // PerInterval = Remaining / Intervals
         
         let currentIds = [...ids];
         const intervals = currentIds.length - 1;
@@ -912,53 +914,50 @@ export class AutoDraftAgent {
             const perIntervalBase = Math.floor(remainingTotal / intervals);
             let remainder = remainingTotal % intervals;
 
-            this.log(`[结构生成] 正在填充关键锚点之间的剧情空隙...`);
-
-            // Iterate backwards to allow insertion without messing up indices of earlier pairs? 
-            // Actually, we use IDs so index doesn't matter for finding context, but we need to insert correctly in the linked list logic.
-            // Wait, addNodesToState adds AFTER a node.
-            
-            // We iterate from first gap to last.
-            for (let i = 0; i < intervals; i++) {
-                if (this.stopSignal) break;
-                
-                const startId = currentIds[i]; // K1
-                const endId = currentIds[i+1]; // K2
-                
-                const startNode = this.getNodes().find(n => n.id === startId);
-                const endNode = this.getNodes().find(n => n.id === endId);
-                
-                const countForThisGap = perIntervalBase + (remainder > 0 ? 1 : 0);
-                if (remainder > 0) remainder--;
-                
-                if (countForThisGap <= 0) continue;
-
-                this.log(`[填充剧情] 在 ${startNode?.title.slice(0,8)}... 和 ${endNode?.title.slice(0,8)}... 之间生成 ${countForThisGap} 个节点`);
-
-                const fillData = await generateNodeExpansion({
-                    currentNode: startNode!,
-                    parentContext: parent,
-                    prevContext: startNode!, // Start of gap
-                    nextContext: endNode!,   // End of gap
-                    globalContext: this.getFullContext(parent),
-                    settings: this.settings,
-                    task: 'CONTINUE', // Use CONTINUE for Infill
-                    milestoneConfig: { totalPoints: countForThisGap, generateCount: countForThisGap, strategy: 'linear' },
-                    structuralContext: context
-                });
-                
-                if (fillData.length > 0) {
-                    const newIds = this.addNodesToState(parentId, fillData, startId); // Insert after startId
-                    await this.waitForNodes(newIds);
+            if (remainingTotal > 0) {
+                this.log(`[结构生成] 正在填充关键节点之间的空隙...`);
+    
+                for (let i = 0; i < intervals; i++) {
+                    if (this.stopSignal) break;
+                    
+                    const startId = currentIds[i]; // K1
+                    const endId = currentIds[i+1]; // K2
+                    
+                    const startNode = this.getNodes().find(n => n.id === startId);
+                    const endNode = this.getNodes().find(n => n.id === endId);
+                    
+                    const countForThisGap = perIntervalBase + (remainder > 0 ? 1 : 0);
+                    if (remainder > 0) remainder--;
+                    
+                    if (countForThisGap <= 0) continue;
+    
+                    this.log(`[填充剧情] 在 ${startNode?.title.slice(0,8)}... 和 ${endNode?.title.slice(0,8)}... 之间生成 ${countForThisGap} 个过渡节点`);
+    
+                    const fillData = await generateNodeExpansion({
+                        currentNode: startNode!,
+                        parentContext: parent,
+                        prevContext: startNode!, // Start of gap
+                        nextContext: endNode!,   // End of gap
+                        globalContext: this.getFullContext(parent),
+                        settings: this.settings,
+                        task: 'CONTINUE', // Use CONTINUE for Infill
+                        milestoneConfig: { totalPoints: countForThisGap, generateCount: countForThisGap, strategy: 'linear' },
+                        structuralContext: context
+                    });
+                    
+                    if (fillData.length > 0) {
+                        const newIds = this.addNodesToState(parentId, fillData, startId); // Insert after startId
+                        await this.waitForNodes(newIds);
+                    }
+                    
+                    await delay(1000);
                 }
-                
-                await delay(1000);
             }
         }
         
         // Return all children of parent, sorted
         const finalParent = this.getNodes().find(n => n.id === parentId);
-        const allChildren = this.getNodes().filter(n => finalParent?.childrenIds.includes(n.id) && n.type === NodeType.PLOT);
+        const allChildren = this.getNodes().filter(n => finalParent?.childrenIds.includes(n.id) && n.type === type);
         
         return allChildren.map(n => n.id);
     }

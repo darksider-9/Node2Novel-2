@@ -2,7 +2,7 @@
 import React, { useRef, useState, useMemo } from 'react';
 import { NodeData, NodeType, ViewMode } from '../types';
 import { NODE_COLORS } from '../constants';
-import { ZoomIn, ZoomOut, ChevronRight, FileText, BookOpen, Layers, Move, ChevronDown, Link as LinkIcon, Users, Map, Flag, Package } from 'lucide-react';
+import { ZoomIn, ZoomOut, ChevronRight, FileText, BookOpen, Layers, Move, ChevronDown, Link as LinkIcon, Users, Map, Flag, Package, LocateFixed } from 'lucide-react';
 
 interface CanvasProps {
   nodes: NodeData[];
@@ -59,6 +59,26 @@ const Canvas: React.FC<CanvasProps> = ({ nodes, onNodeSelect, onNodeMove, onTogg
   const visibleNodes = useMemo(() => {
       return nodes.filter(n => isNodeVisible(n, nodes));
   }, [nodes, viewMode]);
+
+  const handleCenterRoot = () => {
+    const rootNode = nodes.find(n => n.type === NodeType.ROOT) || nodes[0];
+    if (rootNode && containerRef.current) {
+      const { clientWidth, clientHeight } = containerRef.current;
+      const targetScale = 1;
+      
+      // Calculate center for node (224px width)
+      // We assume node height is roughly ~160px based on layout logic
+      const nodeCenterX = rootNode.x + (NODE_WIDTH / 2); 
+      const nodeCenterY = rootNode.y + 80; 
+      
+      // offset = ScreenCenter - (NodePos * Scale)
+      const newX = (clientWidth / 2) - (nodeCenterX * targetScale);
+      const newY = (clientHeight / 2) - (nodeCenterY * targetScale);
+      
+      setOffset({ x: newX, y: newY });
+      setScale(targetScale);
+    }
+  };
 
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
@@ -286,6 +306,7 @@ const Canvas: React.FC<CanvasProps> = ({ nodes, onNodeSelect, onNodeMove, onTogg
       </div>
       
       <div className="absolute bottom-8 left-8 flex gap-2">
+         <button onClick={handleCenterRoot} className="p-2.5 bg-indigo-600 hover:bg-indigo-500 border border-indigo-500 rounded-lg text-white shadow-xl transition" title="回到根节点"><LocateFixed size={18}/></button>
          <button onClick={() => setScale(s => Math.min(s + 0.1, 3))} className="p-2.5 bg-slate-800 border border-slate-700 hover:bg-slate-700 rounded-lg text-white shadow-xl transition"><ZoomIn size={18}/></button>
          <button onClick={() => setScale(s => Math.max(s - 0.1, 0.1))} className="p-2.5 bg-slate-800 border border-slate-700 hover:bg-slate-700 rounded-lg text-white shadow-xl transition"><ZoomOut size={18}/></button>
          <div className="px-3 bg-slate-800 border border-slate-700 text-slate-300 rounded-lg text-xs flex items-center min-w-[60px] justify-center shadow-xl font-mono">{Math.round(scale * 100)}%</div>

@@ -634,14 +634,25 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
   if (task === 'EXPAND') {
       // CASE 1: ROOT -> OUTLINE
       if (currentNode.type === NodeType.ROOT) {
+           const isSpanningStrategy = milestoneConfig?.strategy === 'spanning';
+           const strategyNote = isSpanningStrategy
+             ? `**关键生成策略 (Spanning)**: 请规划全书的 ${count} 个关键分卷节点 (Keyframes)。
+                - 第1卷：故事的开篇/起因。
+                - 中间卷：故事中期的重大转折/高潮。
+                - 最后一卷：故事的最终结局/大高潮。
+                - 这些分卷不需要连续，它们是支撑全书结构的骨架。`
+             : `**常规生成策略 (Linear)**: 请从上一个节点接续，生成紧随其后的 ${count} 个连续分卷。`;
+
            taskPrompt = `
              任务：【全书分卷规划】 (Volume Outline Generation)
              当前书名：${currentNode.title}
              【世界观与主线设定 (Bible)】：
-             ${currentNode.content} 
+             ${currentNode.content}
              
              目标：推演接下来的 ${count} 个“分卷 (OUTLINE)”。
              
+             ${strategyNote}
+
              **核心要求（事件广度）：**
              1. **宏观叙事**：每个分卷概括一整段大的剧情历程。
              2. **事件列表**：请列出该卷内发生的多个关键事件（Events）。不要去细致描写某个场景的心理活动。
@@ -649,7 +660,7 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
              4. **禁止注水**：直接写干货剧情。不要写“主角心情很复杂”这种话，要写“主角杀死了敌人，夺取了宝物，引发了追杀”。
              5. **索引连续性**：如果上一个节点已经是第N卷，请接着生成第N+1卷。
              6. **区域跨度均衡**：确保分卷内容的结尾自然过渡到下一个大区域/副本的开启。不要让分卷在某个高潮中间突然截断，也不要留太长的尾巴。
-             7.**首尾自然：要保证分卷的第一个和最后一个，符合一本书的卷的开始和结尾。
+             7. **首尾自然**：要保证分卷的第一个和最后一个，符合一本书的卷的开始和结尾。
            `;
       } 
       // CASE 2: OUTLINE -> PLOT (UPDATED FOR REALM/COMBAT LOGIC + SPANNING MODE)
