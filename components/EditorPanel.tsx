@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { NodeData, NodeType, AppSettings, LogicValidationResult, LoreUpdateSuggestion } from '../types';
+import { NodeData, NodeType, AppSettings, LogicValidationResult, LoreUpdateSuggestion, MilestoneConfig } from '../types';
 import { Sparkles, X, Trash2, BookOpen, FileText, ShieldCheck, AlertTriangle, Wand2, RefreshCw, Link as LinkIcon, UserPlus, ArrowRightCircle, ListTree, GitMerge, Layout, Globe, PenTool, Hash, ArrowLeft, BrainCircuit, Type as TypeIcon, SearchCheck, Layers, PlusCircle, CheckCircle, Loader2 } from 'lucide-react';
 import { generateChapterContent, generateNodeExpansion, validateStoryLogic, refineContent, extractLoreUpdates, generateRefinementPrompt, analyzeAndGenerateFix, analyzeContentCoverage, validateEndingStyle } from '../services/geminiService';
 import { NODE_COLORS, HIERARCHY_RULES } from '../constants';
@@ -170,19 +170,100 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
 
   const handleExpand = async () => {
     setGlobalLoading(true);
+    setProcessStatus(node.type === NodeType.OUTLINE ? '正在规划关键剧情锚点...' : '正在生成...');
     try {
-      const newNodes = await generateNodeExpansion({
+      // 1. Determine Configuration
+      const isVolumeExpansion = node.type === NodeType.OUTLINE;
+      
+      // CONFIG FOR PLOT -> CHAPTER
+      const plotConfig = node.type === NodeType.PLOT ? { chapterCount, wordCount: wordCountInput } : undefined;
+      
+      // CONFIG FOR OUTLINE -> PLOT
+      // Explicitly set strategy to 'spanning' for OUTLINE to get Keyframes first
+      const outlineConfig: MilestoneConfig | undefined = isVolumeExpansion ? { 
+          totalPoints, 
+          generateCount, 
+          strategy: 'spanning' 
+      } : undefined;
+
+      // 2. Initial Generation (Keyframes or Chapters)
+      const keyframeNodes = await generateNodeExpansion({
         currentNode: node,
         parentContext: parent || undefined,
         prevContext: prevNode || undefined,
         globalContext: getContext(),
         settings,
         task: 'EXPAND',
-        expansionConfig: node.type === NodeType.PLOT ? { chapterCount, wordCount: wordCountInput } : undefined,
-        milestoneConfig: node.type === NodeType.OUTLINE ? { totalPoints, generateCount } : undefined
+        expansionConfig: plotConfig,
+        milestoneConfig: outlineConfig
       });
-      if (newNodes.length) onAddChildren(node.id, newNodes);
-    } catch (e) { alert("生成失败"); } finally { setGlobalLoading(false); }
+
+      // 3. Logic for Volume Infill (Keyframe + Infill Strategy)
+      if (isVolumeExpansion && keyframeNodes.length >= 2 && totalPoints > keyframeNodes.length) {
+           setProcessStatus('正在填充剧情空隙 (Infill)...');
+           
+           const finalSequence: Partial<NodeData>[] = [];
+           const intervals = keyframeNodes.length - 1;
+           const remainingToFill = totalPoints - keyframeNodes.length;
+           
+           if (remainingToFill > 0) {
+               const perGap = Math.floor(remainingToFill / intervals);
+               let remainder = remainingToFill % intervals;
+
+               for (let i = 0; i < intervals; i++) {
+                   const startK = keyframeNodes[i];
+                   const endK = keyframeNodes[i+1];
+                   
+                   // Push Start Keyframe
+                   finalSequence.push(startK);
+
+                   // Calculate gap count for this interval
+                   const countForGap = perGap + (remainder > 0 ? 1 : 0);
+                   if (remainder > 0) remainder--;
+
+                   if (countForGap > 0) {
+                       setProcessStatus(`填充锚点间隙 ${i+1}/${intervals}...`);
+                       
+                       // Mock NodeData for context (needs minimal valid props)
+                       const mockStartNode = { ...node, ...startK, id: 'temp_start', type: NodeType.PLOT } as NodeData;
+                       const mockEndNode = { ...node, ...endK, id: 'temp_end', type: NodeType.PLOT } as NodeData;
+
+                       const infillNodes = await generateNodeExpansion({
+                            currentNode: mockStartNode,
+                            parentContext: node, // Parent is the Volume
+                            prevContext: mockStartNode,
+                            nextContext: mockEndNode,
+                            globalContext: getContext(),
+                            settings,
+                            task: 'CONTINUE', // Infill task
+                            milestoneConfig: { totalPoints: countForGap, generateCount: countForGap, strategy: 'linear' }
+                       });
+                       
+                       finalSequence.push(...infillNodes);
+                   }
+               }
+               // Push Last Keyframe
+               finalSequence.push(keyframeNodes[keyframeNodes.length - 1]);
+               
+               if (finalSequence.length > 0) {
+                   onAddChildren(node.id, finalSequence);
+               }
+           } else {
+               // No filling needed (e.g. totalPoints matches generateCount)
+               onAddChildren(node.id, keyframeNodes);
+           }
+      } else {
+          // Standard behavior for other types or if no fill needed
+          if (keyframeNodes.length) onAddChildren(node.id, keyframeNodes);
+      }
+
+    } catch (e) { 
+        alert("生成失败"); 
+        console.error(e);
+    } finally { 
+        setGlobalLoading(false); 
+        setProcessStatus('');
+    }
   };
 
   const handleContinue = async () => {
