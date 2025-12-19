@@ -1,8 +1,8 @@
 
 import React, { useState } from 'react';
 import { NodeData, NodeType, AppSettings, LogicValidationResult, LoreUpdateSuggestion } from '../types';
-import { Sparkles, X, Trash2, BookOpen, FileText, ShieldCheck, AlertTriangle, Wand2, RefreshCw, Link as LinkIcon, UserPlus, ArrowRightCircle, ListTree, GitMerge, Layout, Globe, PenTool, Hash, ArrowLeft, BrainCircuit, Type as TypeIcon, SearchCheck, Layers, PlusCircle, CheckCircle } from 'lucide-react';
-import { generateChapterContent, generateNodeExpansion, validateStoryLogic, refineContent, extractLoreUpdates, generateRefinementPrompt, analyzeAndGenerateFix, analyzeContentCoverage } from '../services/geminiService';
+import { Sparkles, X, Trash2, BookOpen, FileText, ShieldCheck, AlertTriangle, Wand2, RefreshCw, Link as LinkIcon, UserPlus, ArrowRightCircle, ListTree, GitMerge, Layout, Globe, PenTool, Hash, ArrowLeft, BrainCircuit, Type as TypeIcon, SearchCheck, Layers, PlusCircle, CheckCircle, Loader2 } from 'lucide-react';
+import { generateChapterContent, generateNodeExpansion, validateStoryLogic, refineContent, extractLoreUpdates, generateRefinementPrompt, analyzeAndGenerateFix, analyzeContentCoverage, validateEndingStyle } from '../services/geminiService';
 import { NODE_COLORS, HIERARCHY_RULES } from '../constants';
 
 interface EditorPanelProps {
@@ -36,6 +36,9 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
   
   // NEW: Coverage Analysis Result State
   const [coverageResult, setCoverageResult] = useState<{ missingNodes: { title: string, summary: string, insertAfterId: string | null }[] } | null>(null);
+  
+  // Local Loading State for precise feedback
+  const [processStatus, setProcessStatus] = useState<string>('');
 
   // Config for PLOT -> CHAPTER
   const [chapterCount, setChapterCount] = useState(3);
@@ -75,6 +78,36 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
 
   const getWordCount = () => {
       return (node.content || "").length;
+  };
+
+  // Helper: Calculate Global Chapter Index for "Golden Three" logic
+  const calculateGlobalIndex = () => {
+      // Traverse from root to find all chapters in order
+      const root = nodes.find(n => n.type === NodeType.ROOT);
+      if (!root) return 1;
+
+      const allChapters: string[] = [];
+      const traverse = (parentId: string) => {
+          const children = nodes.filter(n => n.parentId === parentId);
+          // Sort by Y to approximate visual/chronological order
+          children.sort((a,b) => a.y - b.y);
+          children.forEach(child => {
+              if (child.type === NodeType.CHAPTER) {
+                  allChapters.push(child.id);
+              } else {
+                  traverse(child.id);
+              }
+          });
+      };
+      traverse(root.id);
+      return allChapters.indexOf(node.id) + 1;
+  };
+
+  // Helper: Sanitize text (remove markdown blocks if any)
+  const sanitizeText = (text: string) => {
+      const codeBlockRegex = /^```(?:markdown)?\s*([\s\S]*?)\s*```$/i;
+      const match = text.match(codeBlockRegex);
+      return match && match[1] ? match[1].trim() : text.trim();
   };
 
   // ---------------- Handlers ----------------
@@ -184,24 +217,90 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
       } finally { setGlobalLoading(false); }
   };
 
+  // --- UPGRADED: Full Pipeline Generation (Identical to AutoDraftAgent) ---
   const handleWrite = async () => {
     setGlobalLoading(true);
+    setProcessStatus('正在构思初稿...');
     try {
-      // Pass the node.prevNodeId logic to service. 
-      // The Service now handles "Strict Bai Miao" and "Previous Context Slicing"
-      const content = await generateChapterContent({
+      const globalIndex = calculateGlobalIndex();
+      const context = getContext();
+
+      // 1. Generate Initial Draft
+      // Note: `node.summary` is already passed via `currentNode` param inside the service
+      let content = await generateChapterContent({
         currentNode: node,
         parentContext: parent || undefined,
         prevContext: prevNode || undefined,
-        globalContext: getContext(),
-        storyContext: storyContext, // Pass the rolling summary
+        globalContext: context,
+        storyContext: storyContext,
         settings,
-        task: 'WRITE'
+        task: 'WRITE',
+        structuralContext: { globalChapterIndex: globalIndex }
       });
-      // Append for chapters, but usually overwrite or append depending on user flow.
-      // Here we append with newline.
-      onUpdate(node.id, { content: (node.content || "") + ((node.content || "").length > 0 ? '\n\n' : '') + content });
-    } catch (e) { alert("写作失败"); } finally { setGlobalLoading(false); }
+      content = sanitizeText(content);
+      
+      // Update intermediate state
+      onUpdate(node.id, { content });
+
+      // 2. Auto-Optimize (Quality Gate)
+      setProcessStatus('正在进行主编级审稿...');
+      // Mock node with new content for analysis
+      const tempNode = { ...node, content: content }; 
+      const instruction = await analyzeAndGenerateFix(
+          tempNode, 
+          context, 
+          "", // resources context already in full context or skip for now
+          2000, 
+          "", 
+          settings, 
+          globalIndex === 1
+      );
+
+      if (!instruction.includes("PASS")) {
+          setProcessStatus('根据审稿意见进行精修...');
+          const refined = await refineContent(content, instruction, settings, context);
+          content = sanitizeText(refined);
+          onUpdate(node.id, { content });
+      }
+
+      // 3. Expansion Check (Length Gate)
+      // Default target 2000 chars for high density
+      if (content.length < 2000) {
+           setProcessStatus(`篇幅不足(${content.length}/2000)，正在执行硬性扩充...`);
+           const expansionInstr = `
+            【正文扩充任务】
+            当前内容字数：${content.length}字。
+            目标字数：2000字以上。
+            请保留剧情逻辑，通过增加环境描写、心理描写、动作细节和对话来扩充篇幅。是"写得更细"。
+           `;
+           const expanded = await refineContent(content, expansionInstr, settings, context);
+           content = sanitizeText(expanded);
+           onUpdate(node.id, { content });
+      }
+
+      // 4. Ending Style Check
+      setProcessStatus('正在检查章节结尾风格...');
+      const endingCheck = await validateEndingStyle(content, settings);
+      if (!endingCheck.isValid) {
+          setProcessStatus('发现违规结尾，正在重写...');
+          const cutIndex = Math.max(0, content.length - 1000);
+          const endingSlice = content.slice(cutIndex);
+          const safeContent = content.slice(0, cutIndex);
+          
+          const fixInstr = `【结尾重写任务】\n**严禁出现这类描述**：\n1. **预示未来**...\n2. **总结陈词**...\n\n${endingCheck.fixInstruction}`;
+          const fixedEnding = await refineContent(endingSlice, fixInstr, settings, context);
+          
+          content = safeContent + sanitizeText(fixedEnding);
+          onUpdate(node.id, { content });
+      }
+
+      setProcessStatus('');
+    } catch (e) { 
+        alert("写作失败: " + e); 
+    } finally { 
+        setGlobalLoading(false); 
+        setProcessStatus('');
+    }
   };
 
   const handlePolishContent = async () => {
@@ -326,6 +425,14 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
                       </button>
                   </div>
               </div>
+          </div>
+      )}
+      
+      {/* Process Status Overlay (When Manually Generating) */}
+      {processStatus && (
+          <div className="absolute top-16 left-4 right-4 z-50 bg-indigo-900/90 text-indigo-100 p-3 rounded-lg text-xs font-bold shadow-xl border border-indigo-500/50 flex items-center justify-center gap-3 animate-pulse">
+              <Loader2 size={16} className="animate-spin"/>
+              {processStatus}
           </div>
       )}
 
@@ -495,7 +602,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
                                      {prevNode ? `将自动衔接前章: ${prevNode.title}` : '当前为首章'}
                                  </div>
                                  <button onClick={handleWrite} className="w-full bg-gradient-to-r from-amber-700 to-orange-700 hover:from-amber-600 hover:to-orange-600 text-white font-bold py-2.5 rounded-lg flex items-center justify-center gap-2 text-xs shadow-lg shadow-amber-900/20 transition">
-                                     <PenTool size={14} /> 生成正文 (白描/对话流)
+                                     <PenTool size={14} /> 生成正文 (初稿+精修+质检)
                                  </button>
                              </div>
                         )}
