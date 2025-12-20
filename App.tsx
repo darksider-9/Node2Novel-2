@@ -399,7 +399,8 @@ const App: React.FC = () => {
               parentId: null,
               childrenIds: [],
               collapsed: false,
-              associations: []
+              associations: [],
+              status: {}
           };
           
           const initialNodes = [rootNode];
@@ -537,7 +538,8 @@ const App: React.FC = () => {
              childrenIds: [],
              prevNodeId: index === 0 ? previousSiblingId : null,
              associations: parent.associations ? [...parent.associations] : [], 
-             collapsed: false
+             collapsed: false,
+             status: {}
          };
      });
 
@@ -577,7 +579,8 @@ const App: React.FC = () => {
           childrenIds: [],
           prevNodeId: prevNodeId,
           associations: prevNode.associations ? [...prevNode.associations] : [],
-          collapsed: false
+          collapsed: false,
+          status: {}
       };
 
       setNodes(prev => {
@@ -625,7 +628,8 @@ const App: React.FC = () => {
           parentId: null,
           childrenIds: [],
           collapsed: false,
-          associations: []
+          associations: [],
+          status: {}
       };
       setNodes(prev => [...prev, newNode]);
       setSelectedNodeId(newNode.id);
@@ -775,6 +779,7 @@ const App: React.FC = () => {
           onNodeSelect={handleNodeSelect}
           onNodeMove={handleNodeMove}
           onToggleCollapse={handleToggleCollapse}
+          onUpdateNode={handleNodeUpdate} // NEW: Pass update handler
         />
         
         {/* Background Processing Indicator */}

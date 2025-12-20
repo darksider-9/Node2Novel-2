@@ -1,16 +1,17 @@
 
 import React, { useRef, useState, useMemo } from 'react';
 import { NodeData, NodeType, ViewMode } from '../types';
-import { NODE_COLORS } from '../constants';
-import { ZoomIn, ZoomOut, ChevronRight, FileText, BookOpen, Layers, Move, ChevronDown, Link as LinkIcon, Users, Map, Flag, Package, LocateFixed } from 'lucide-react';
+import { NODE_COLORS, NODE_STATUS_CONFIG } from '../constants';
+import { ZoomIn, ZoomOut, ChevronRight, FileText, BookOpen, Layers, Move, ChevronDown, Link as LinkIcon, Users, Map, Flag, Package, LocateFixed, CheckCircle } from 'lucide-react';
 
 interface CanvasProps {
   nodes: NodeData[];
   onNodeSelect: (id: string) => void;
   onNodeMove: (id: string, x: number, y: number) => void;
   onToggleCollapse: (id: string) => void;
+  onUpdateNode: (id: string, updates: Partial<NodeData>) => void; // NEW: Needed for toggling status
   selectedNodeId: string | null;
-  viewMode: ViewMode; // NEW Prop
+  viewMode: ViewMode;
 }
 
 const getNodeIcon = (type: NodeType) => {
@@ -27,7 +28,7 @@ const getNodeIcon = (type: NodeType) => {
   }
 };
 
-const Canvas: React.FC<CanvasProps> = ({ nodes, onNodeSelect, onNodeMove, onToggleCollapse, selectedNodeId, viewMode }) => {
+const Canvas: React.FC<CanvasProps> = ({ nodes, onNodeSelect, onNodeMove, onToggleCollapse, onUpdateNode, selectedNodeId, viewMode }) => {
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [scale, setScale] = useState(1);
   const [isDraggingCanvas, setIsDraggingCanvas] = useState(false);
@@ -121,6 +122,17 @@ const Canvas: React.FC<CanvasProps> = ({ nodes, onNodeSelect, onNodeMove, onTogg
   const handleMouseUp = () => {
     setIsDraggingCanvas(false);
     setIsDraggingNode(null);
+  };
+
+  const toggleStatus = (e: React.MouseEvent, nodeId: string, statusKey: string) => {
+      e.stopPropagation(); // Prevent drag/select
+      const node = nodes.find(n => n.id === nodeId);
+      if (!node) return;
+      
+      const currentStatus = node.status || {};
+      onUpdateNode(nodeId, {
+          status: { ...currentStatus, [statusKey]: !currentStatus[statusKey] }
+      });
   };
 
   const renderConnections = () => {
@@ -241,12 +253,14 @@ const Canvas: React.FC<CanvasProps> = ({ nodes, onNodeSelect, onNodeMove, onTogg
         </svg>
 
         {visibleNodes.map(node => {
-           // Fallback to PLOT colors if type is unknown to prevent crash
            const colors = NODE_COLORS[node.type] || NODE_COLORS[NodeType.PLOT];
            const isSelected = selectedNodeId === node.id;
            const hasChildren = (node.childrenIds || []).length > 0;
            const contentExists = node.content && node.content.length > 0;
            
+           // Status Configuration
+           const statusConfig = NODE_STATUS_CONFIG[node.type] || [];
+
            return (
             <div
               key={node.id}
@@ -282,23 +296,45 @@ const Canvas: React.FC<CanvasProps> = ({ nodes, onNodeSelect, onNodeMove, onTogg
                   </div>
               </div>
               
-              <div className="flex gap-2 px-3 pb-3">
-                 {node.prevNodeId && viewMode === 'story' && (
-                    <span title="Link to Previous">
-                       <LinkIcon size={12} className="text-white/40" />
-                    </span>
-                 )}
-                 {contentExists && (
-                    <span title="Has Content">
-                       <FileText size={12} className="text-emerald-400" />
-                    </span>
-                 )}
-                 {node.associations && node.associations.length > 0 && (
-                     <div className="flex items-center gap-1 text-[9px] text-pink-300 bg-pink-900/40 px-1 rounded">
-                         <span className="w-1.5 h-1.5 rounded-full bg-pink-500"></span>
-                         {node.associations.length}
-                     </div>
-                 )}
+              <div className="flex flex-col gap-2 border-t border-white/5 bg-black/20 rounded-b-xl">
+                  {/* Icons Row */}
+                  <div className="flex gap-2 px-3 py-2 items-center">
+                     {node.prevNodeId && viewMode === 'story' && (
+                        <span title="Link to Previous">
+                           <LinkIcon size={12} className="text-white/40" />
+                        </span>
+                     )}
+                     {contentExists && (
+                        <span title="Has Content">
+                           <FileText size={12} className="text-emerald-400" />
+                        </span>
+                     )}
+                     {node.associations && node.associations.length > 0 && (
+                         <div className="flex items-center gap-1 text-[9px] text-pink-300 bg-pink-900/40 px-1 rounded">
+                             <span className="w-1.5 h-1.5 rounded-full bg-pink-500"></span>
+                             {node.associations.length}
+                         </div>
+                     )}
+                  </div>
+                  
+                  {/* Status Bar */}
+                  {statusConfig.length > 0 && (
+                      <div className="px-3 pb-2 flex justify-between gap-1">
+                          {statusConfig.map(s => {
+                              const isActive = node.status?.[s.key];
+                              return (
+                                  <button
+                                    key={s.key}
+                                    onMouseDown={(e) => toggleStatus(e, node.id, s.key)}
+                                    title={s.label + (isActive ? ' (Completed)' : ' (Pending)')}
+                                    className={`flex-1 flex justify-center py-1 rounded transition ${isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800/50 text-slate-600 hover:text-slate-400'}`}
+                                  >
+                                      <s.icon size={10} />
+                                  </button>
+                              )
+                          })}
+                      </div>
+                  )}
               </div>
             </div>
           );

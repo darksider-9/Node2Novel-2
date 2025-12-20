@@ -15,10 +15,6 @@ export class AutoDraftAgent {
     private stopSignal: boolean = false;
     private logHistory: string[] = []; 
     private globalChapterCounter: number = 0;
-    
-    // NEW: Session Cache to prevent infinite loops / repetitive checks in "auditAncestry"
-    // Stores IDs of nodes that have passed validation in the current run
-    private validatedSessionIds: Set<string> = new Set();
 
     constructor(
         settings: AppSettings, 
@@ -149,41 +145,25 @@ export class AutoDraftAgent {
         }).filter(Boolean).join('\n');
     }
 
-    // --- LOG RECOVERY ---
-    private recoverStateFromLogs(logs: string) {
-        if (!logs) return;
-        this.log("正在解析日志以恢复进度...");
-        const lines = logs.split('\n');
-        const nodes = this.getNodes();
-        let recoveredCount = 0;
-
-        // 1. Recover "PASS" validations
-        // Pattern: [智能审计] 节点 TITLE 质量达标 (PASS)。
-        const passRegex = /\[智能审计\] 节点 (.*?) 质量达标 \(PASS\)/;
-        
-        lines.forEach(line => {
-            const match = line.match(passRegex);
-            if (match && match[1]) {
-                const title = match[1].trim();
-                const node = nodes.find(n => n.title.trim() === title);
-                if (node) {
-                    this.validatedSessionIds.add(node.id);
-                    recoveredCount++;
-                }
-            }
-        });
-
-        if (recoveredCount > 0) {
-            this.log(`[恢复成功] 已标记 ${recoveredCount} 个节点为通过状态，将跳过重复审计。`);
-        } else {
-            this.log(`[恢复提示] 未从日志中提取到有效节点状态，将全量执行。`);
-        }
+    // --- HELPER: CHECK NODE STATUS ---
+    private isNodeDone(nodeId: string, flag: string): boolean {
+        const node = this.getNodes().find(n => n.id === nodeId);
+        return !!node?.status?.[flag];
+    }
+    
+    private markNodeDone(nodeId: string, flag: string) {
+        this.updateNode(nodeId, {}, { [flag]: true });
     }
 
     // --- RESOURCE LIFECYCLE MANAGEMENT ---
     // 1. Inherit (Associate Subset)
     // 2. Evolve (Extract & Update & Propagate)
     private async manageResourceLifecycle(nodeId: string, parentId: string) {
+        if (this.isNodeDone(nodeId, 'res_sync')) {
+            this.log(`[跳过] 资源同步已完成: ${nodeId.slice(-4)}`);
+            return;
+        }
+
         await this.waitForNodes([nodeId, parentId]);
         const allNodes = this.getNodes();
         const node = allNodes.find(n => n.id === nodeId);
@@ -252,7 +232,8 @@ export class AutoDraftAgent {
                          parentId: null,
                          childrenIds: [],
                          collapsed: false,
-                         associations: []
+                         associations: [],
+                         status: {}
                      });
                      newResourceIds.push(newId);
                      messages.push(`[新增] ${res.title}`);
@@ -302,10 +283,15 @@ export class AutoDraftAgent {
                 this.log(`[资源库更新] 完成: ${messages.join(', ')}`);
             }
         }
+        
+        this.markNodeDone(nodeId, 'res_sync');
     }
 
     // --- QUALITY GATE 1: HARD EXPANSION CHECK ---
     private async expansionPhase(nodeId: string, minLength: number): Promise<boolean> {
+        // NOTE: Expansion Phase is merged into 'opt_quality' step for status tracking
+        // We won't strictly skip it unless optimized, but for simplicity, we assume
+        // optimization covers length check.
         await this.waitForNodes([nodeId], 3000);
         const node = this.getNodes().find(n => n.id === nodeId);
         if (!node) return false;
@@ -354,6 +340,11 @@ export class AutoDraftAgent {
 
     // --- QUALITY GATE 2: VOLUME SPAN CHECK ---
     private async checkAndFixVolumeSpan(nodeId: string) {
+        if (this.isNodeDone(nodeId, 'val_struct')) {
+            this.log(`[跳过] 结构校验已完成: ${nodeId.slice(-4)}`);
+            return;
+        }
+
         await this.waitForNodes([nodeId], 3000);
         const node = this.getNodes().find(n => n.id === nodeId);
         if (!node || node.type !== NodeType.OUTLINE) return;
@@ -376,10 +367,16 @@ export class AutoDraftAgent {
             this.updateNode(nodeId, { summary: newSummary, content: newSummary });
             await delay(1000);
         }
+        this.markNodeDone(nodeId, 'val_struct');
     }
 
     // --- QUALITY GATE 3: SMART OPTIMIZE (Prompt-Based) ---
     private async optimizeNode(nodeId: string, targetWordCount: number = 0, currentGlobalIndex: number = 0): Promise<boolean> {
+        if (this.isNodeDone(nodeId, 'opt_quality')) {
+            this.log(`[跳过] 内容精修已完成: ${nodeId.slice(-4)}`);
+            return true;
+        }
+
         await this.waitForNodes([nodeId]);
         const node = this.getNodes().find(n => n.id === nodeId);
         if (!node) return false;
@@ -389,6 +386,7 @@ export class AutoDraftAgent {
 
         // Fast pass for non-root nodes that are long enough
         if (currentLen >= effectiveWordCount && node.type !== NodeType.ROOT && node.type !== NodeType.OUTLINE) {
+             this.markNodeDone(nodeId, 'opt_quality');
              return true; 
         }
 
@@ -413,6 +411,7 @@ export class AutoDraftAgent {
 
         if (instruction.trim() === "PASS") {
             this.log(`[智能审计] 节点 ${node.title} 质量达标 (PASS)。`);
+            this.markNodeDone(nodeId, 'opt_quality');
             return true;
         }
 
@@ -430,6 +429,7 @@ export class AutoDraftAgent {
         });
         
         await delay(1000); 
+        this.markNodeDone(nodeId, 'opt_quality');
         return true;
     }
 
@@ -454,36 +454,32 @@ export class AutoDraftAgent {
             const ancestor = allNodes.find(n => n.id === ancestorId);
             if (!ancestor) continue;
 
-            // --- CACHE CHECK ---
-            // If we have already validated this ancestor in this "start()" session, skip it.
-            if (this.validatedSessionIds.has(ancestorId)) {
-                continue;
-            }
-
             // Define targets based on type
             let targetLen = 500;
             if (ancestor.type === NodeType.ROOT) targetLen = 1000;
             if (ancestor.type === NodeType.OUTLINE) targetLen = 800;
             if (ancestor.type === NodeType.PLOT) targetLen = 400;
 
-            // Perform Checks
+            // Perform Checks based on persisted status
             this.log(`[递归审计] 检查祖先节点: ${ancestor.title}`);
-            await this.optimizeNode(ancestorId, targetLen);
             
             if (ancestor.type === NodeType.OUTLINE) {
                 await this.checkAndFixVolumeSpan(ancestorId);
             }
-
-            await this.expansionPhase(ancestorId, targetLen);
-
-            // Mark as validated for this session
-            this.validatedSessionIds.add(ancestorId);
+            
+            await this.optimizeNode(ancestorId, targetLen);
+            await this.expansionPhase(ancestorId, targetLen); // Length check
         }
     }
     
     // --- NEW: GAP ANALYSIS (Plot Pacing Agent) ---
     private async refinePlotSequence(plotIds: string[], parentId: string) {
         if (!this.config.enablePlotAnalysis || plotIds.length < 2) return;
+        
+        // Pacing check usually shouldn't be skipped if we added new nodes, but for now we won't add a strict flag for parent pacing check
+        // Or we could attach 'val_struct' to Parent Outline for Pacing? 
+        // Let's assume Pacing Check is part of 'val_struct' for Outline if we wanted strictness.
+        // For now, we run it if not explicitly skipped.
 
         await this.waitForNodes([parentId, ...plotIds]);
         const allNodes = this.getNodes();
@@ -521,7 +517,8 @@ export class AutoDraftAgent {
                         childrenIds: [],
                         prevNodeId: afterId,
                         associations: prevNode.associations,
-                        collapsed: false
+                        collapsed: false,
+                        status: {}
                     };
                     
                     this.log(`[自动插入] 过渡节点: ${newNode.title}`);
@@ -552,12 +549,7 @@ export class AutoDraftAgent {
     
     public async start(rootNodeId: string) {
         this.stopSignal = false;
-        this.validatedSessionIds.clear();
-        
-        // Recover state from logs if provided
-        if (this.config.recoveryLogs) {
-            this.recoverStateFromLogs(this.config.recoveryLogs);
-        }
+        // removed local set clear
         
         try {
             this.log("启动全自动创作引擎 (优化加强版)...");
@@ -571,37 +563,36 @@ export class AutoDraftAgent {
             this.log("=== 阶段一：全书骨架铺设与校验 ===");
 
             // 1. Root
-            if (!this.validatedSessionIds.has(rootNodeId)) {
-                this.log(">> 正在校验核心世界观...");
-                await this.optimizeNode(rootNodeId, 1000);
-                await this.expansionPhase(rootNodeId, 1000);
-                
-                // [Root Resource Init]
-                this.log(">> 正在初始化世界观资源库...");
-                await this.manageResourceLifecycle(rootNodeId, rootNodeId); 
-                
-                this.validatedSessionIds.add(rootNodeId); 
-            } else {
-                this.log(">> [跳过] 核心世界观已在日志中确认达标。");
-            }
+            this.log(">> 正在校验核心世界观...");
+            await this.optimizeNode(rootNodeId, 1000);
+            await this.expansionPhase(rootNodeId, 1000); // Length check
+            
+            // [Root Resource Init]
+            this.log(">> 正在初始化世界观资源库...");
+            await this.manageResourceLifecycle(rootNodeId, rootNodeId); 
+            
+            this.markNodeDone(rootNodeId, 'exp_children'); // Marked implicitly after next step
 
             // 2. Ensure ALL Volumes exist
             // UPGRADE: Use Spanning Generation for Volume Structure (Head & Tail) if count >= 3
-            this.log(">> 正在规划全书分卷结构 (Head/Tail Strategy)...");
-            let targetVolumeCount = this.config.volumeCount;
-            const volumeIds = await this.ensureChildren(rootNodeId, NodeType.OUTLINE, targetVolumeCount);
+            if (!this.isNodeDone(rootNodeId, 'exp_children')) {
+                this.log(">> 正在规划全书分卷结构 (Head/Tail Strategy)...");
+                let targetVolumeCount = this.config.volumeCount;
+                await this.ensureChildren(rootNodeId, NodeType.OUTLINE, targetVolumeCount);
+                this.markNodeDone(rootNodeId, 'exp_children');
+            } else {
+                this.log(">> [跳过] 分卷规划已完成。");
+            }
             
+            const root = this.getNodes().find(n => n.id === rootNodeId);
+            const volumeIds = this.getNodes().filter(n => root?.childrenIds.includes(n.id) && n.type === NodeType.OUTLINE).map(n => n.id);
+
             // 3. Process ALL Volumes (Structure Check + RESOURCE SYNC)
             this.log(`>> 正在优化 ${volumeIds.length} 个分卷大纲...`);
             for (const volId of volumeIds) {
                 if (this.stopSignal) break;
                 
-                if (this.validatedSessionIds.has(volId)) {
-                     this.log(`>> [跳过] 分卷 ${volId} 已达标。`);
-                     continue;
-                }
-
-                // Vertical Check (Uses Cache)
+                // Vertical Check
                 await this.auditAncestry(volId);
                 // Horizontal Check
                 await this.checkAndFixVolumeSpan(volId);
@@ -610,8 +601,6 @@ export class AutoDraftAgent {
                 
                 // --- BLOCKING RESOURCE SYNC FOR VOLUME ---
                 await this.manageResourceLifecycle(volId, rootNodeId);
-
-                this.validatedSessionIds.add(volId); // Mark volume as good
             }
 
             // --- DEPTH CHECK: OUTLINE ---
@@ -626,34 +615,40 @@ export class AutoDraftAgent {
             for (let i = 0; i < volumeIds.length; i++) {
                 if (this.stopSignal) break;
                 const volId = volumeIds[i];
-                const volNode = this.getNodes().find(n => n.id === volId);
                 
-                // DYNAMIC AGENT: Consult Structural Architect for Plot Count
-                let targetPlotCount = this.config.plotPointsPerVolume;
-                if (this.config.enablePlotAnalysis && volNode) {
-                    this.log(`[结构规划 Agent] 正在分析分卷 "${volNode.title}" 的体量...`);
-                    const advice = await consultStructuralArchitect(
-                        volNode, 
-                        NodeType.PLOT, 
-                        this.config.pacing || 'Normal', 
-                        targetPlotCount, 
-                        this.settings
-                    );
-                    this.log(`[结构规划] 建议生成 ${advice.count} 个剧情点。理由：${advice.reason}`);
-                    targetPlotCount = advice.count;
-                }
+                if (!this.isNodeDone(volId, 'exp_children')) {
+                    const volNode = this.getNodes().find(n => n.id === volId);
+                    
+                    // DYNAMIC AGENT: Consult Structural Architect for Plot Count
+                    let targetPlotCount = this.config.plotPointsPerVolume;
+                    if (this.config.enablePlotAnalysis && volNode) {
+                        this.log(`[结构规划 Agent] 正在分析分卷 "${volNode.title}" 的体量...`);
+                        const advice = await consultStructuralArchitect(
+                            volNode, 
+                            NodeType.PLOT, 
+                            this.config.pacing || 'Normal', 
+                            targetPlotCount, 
+                            this.settings
+                        );
+                        this.log(`[结构规划] 建议生成 ${advice.count} 个剧情点。理由：${advice.reason}`);
+                        targetPlotCount = advice.count;
+                    }
 
-                // Ensure Plots exist (UPGRADE: uses Keyframe Strategy if count >= 5)
-                const plotIds = await this.ensureChildren(volId, NodeType.PLOT, targetPlotCount, { volumeIndex: i + 1 });
-                
-                // DYNAMIC AGENT: Pacing Check (Gap Filling)
-                if (this.config.enablePlotAnalysis) {
-                     await this.refinePlotSequence(plotIds, volId);
+                    // Ensure Plots exist (UPGRADE: uses Keyframe Strategy if count >= 5)
+                    const plotIds = await this.ensureChildren(volId, NodeType.PLOT, targetPlotCount, { volumeIndex: i + 1 });
+                    
+                    // DYNAMIC AGENT: Pacing Check (Gap Filling)
+                    if (this.config.enablePlotAnalysis) {
+                        await this.refinePlotSequence(plotIds, volId);
+                    }
+                    this.markNodeDone(volId, 'exp_children');
+                } else {
+                    this.log(`>> [跳过] 分卷 ${volId} 剧情推演已完成。`);
                 }
 
                 // Re-fetch Plot IDs (in case gaps were inserted)
                 const finalVolNode = this.getNodes().find(n => n.id === volId);
-                const finalPlotIds = finalVolNode ? this.getNodes().filter(n => finalVolNode.childrenIds.includes(n.id) && n.type === NodeType.PLOT).map(n=>n.id) : plotIds;
+                const finalPlotIds = finalVolNode ? this.getNodes().filter(n => finalVolNode.childrenIds.includes(n.id) && n.type === NodeType.PLOT).map(n=>n.id) : [];
 
                 // Batch Validate
                 await this.batchCheckAndFix(finalPlotIds, volId);
@@ -661,17 +656,13 @@ export class AutoDraftAgent {
                 // Individual Optimization + RESOURCE SYNC
                 for (const plotId of finalPlotIds) {
                     if (this.stopSignal) break;
-                    
-                    if (this.validatedSessionIds.has(plotId)) continue;
 
-                    await this.auditAncestry(plotId); // Uses Cache
+                    await this.auditAncestry(plotId); 
                     await this.optimizeNode(plotId, 400);
                     await this.expansionPhase(plotId, 400);
 
                     // --- BLOCKING RESOURCE SYNC FOR PLOT ---
                     await this.manageResourceLifecycle(plotId, volId);
-
-                    this.validatedSessionIds.add(plotId); // Mark plot as good
                 }
             }
 
@@ -693,32 +684,35 @@ export class AutoDraftAgent {
                 for (let j = 0; j < plotIds.length; j++) {
                     if (this.stopSignal) break;
                     const plotId = plotIds[j];
-                    const plotNode = this.getNodes().find(n => n.id === plotId);
-
-                    // DYNAMIC AGENT: Consult Structural Architect for Chapter Count
-                    let targetChapCount = this.config.chaptersPerPlot;
-                    if (this.config.enablePlotAnalysis && plotNode) {
-                         const advice = await consultStructuralArchitect(
-                            plotNode,
-                            NodeType.CHAPTER,
-                            this.config.pacing || 'Normal',
-                            targetChapCount,
-                            this.settings
-                         );
-                         targetChapCount = advice.count;
-                    }
-
-                    const cIds = await this.ensureChildren(plotId, NodeType.CHAPTER, targetChapCount, {
-                        volumeIndex: i + 1,
-                        plotIndex: j + 1,
-                        globalChapterIndex: tempGlobalChapterIdx
-                    });
-                    tempGlobalChapterIdx += cIds.length;
                     
-                    // Audit placeholder parents once
-                    for(const cid of cIds) {
-                         if (this.stopSignal) break;
-                         await this.auditAncestry(cid);
+                    if (!this.isNodeDone(plotId, 'exp_children')) {
+                        const plotNode = this.getNodes().find(n => n.id === plotId);
+
+                        // DYNAMIC AGENT: Consult Structural Architect for Chapter Count
+                        let targetChapCount = this.config.chaptersPerPlot;
+                        if (this.config.enablePlotAnalysis && plotNode) {
+                            const advice = await consultStructuralArchitect(
+                                plotNode,
+                                NodeType.CHAPTER,
+                                this.config.pacing || 'Normal',
+                                targetChapCount,
+                                this.settings
+                            );
+                            targetChapCount = advice.count;
+                        }
+
+                        const cIds = await this.ensureChildren(plotId, NodeType.CHAPTER, targetChapCount, {
+                            volumeIndex: i + 1,
+                            plotIndex: j + 1,
+                            globalChapterIndex: tempGlobalChapterIdx
+                        });
+                        tempGlobalChapterIdx += cIds.length;
+                        this.markNodeDone(plotId, 'exp_children');
+                    } else {
+                        // Just count them up for index
+                        const plotNode = this.getNodes().find(n => n.id === plotId);
+                        const cCount = plotNode ? this.getNodes().filter(n => plotNode.childrenIds.includes(n.id) && n.type === NodeType.CHAPTER).length : 0;
+                        tempGlobalChapterIdx += cCount;
                     }
                 }
             }
@@ -754,12 +748,19 @@ export class AutoDraftAgent {
                         const chapId = chapterIds[k];
                         this.globalChapterCounter++;
                         
+                        // Check Write status
+                        if (this.isNodeDone(chapId, 'con_draft')) {
+                             this.log(`[跳过] 章节 ${chapId.slice(-4)} 已撰写。`);
+                             continue;
+                        }
+
                         await this.waitForNodes([chapId]);
                         const chapNode = this.getNodes().find(n => n.id === chapId);
                         
-                        // Check if written
+                        // Check if manually written
                         if (chapNode && (chapNode.content || "").length > 1000) {
-                            continue;
+                             this.markNodeDone(chapId, 'con_draft');
+                             continue;
                         }
 
                         await this.auditAncestry(chapId);
@@ -771,8 +772,7 @@ export class AutoDraftAgent {
                         await this.expansionPhase(chapId, this.config.wordCountPerChapter);
                         await this.ensureChapterEnding(chapId);
                         
-                        // Mark chapter as done in cache (optional)
-                        this.validatedSessionIds.add(chapId);
+                        this.markNodeDone(chapId, 'con_draft');
                     }
                 }
             }
@@ -987,6 +987,8 @@ export class AutoDraftAgent {
     // NEW: Separated Ending Check as the Final Gate
     // FIXED: Uses slicing to preserve main content if fix is needed.
     private async ensureChapterEnding(chapterId: string) {
+        if (this.isNodeDone(chapterId, 'val_end')) return;
+
         await this.waitForNodes([chapterId]);
         const chapter = this.getNodes().find(n => n.id === chapterId);
         if (!chapter || !chapter.content) return;
@@ -1023,6 +1025,7 @@ export class AutoDraftAgent {
         } else {
             this.log(`[终审] 结尾风格通过。`);
         }
+        this.markNodeDone(chapterId, 'val_end');
     }
 
     private async batchCheckAndFix(nodeIds: string[], parentId: string) {
@@ -1034,6 +1037,14 @@ export class AutoDraftAgent {
         for (let i = 0; i < nodeIds.length; i += BATCH_SIZE) {
             if (this.stopSignal) break;
             const batchIds = nodeIds.slice(i, i + BATCH_SIZE);
+            
+            // Should we skip if all nodes in batch are "val_struct"?
+            // 'val_struct' is the flag for logic check for Plots.
+            // But logic check is holistic (batch). 
+            // We can check if *any* node is unchecked, then run batch.
+            // But batch runs on all.
+            // Let's check if the *last* node in batch is checked. If so, likely done.
+            if (this.isNodeDone(batchIds[batchIds.length-1], 'val_struct')) continue;
             
             const allExist = await this.waitForNodes(batchIds, 5000);
             if (!allExist) continue;
@@ -1067,6 +1078,9 @@ export class AutoDraftAgent {
                     hasConflicts = false;
                 }
             }
+            
+            // Mark all in batch as done
+            batchIds.forEach(id => this.markNodeDone(id, 'val_struct'));
         }
     }
 
@@ -1114,7 +1128,8 @@ export class AutoDraftAgent {
                 childrenIds: [],
                 prevNodeId: prevId, // Chain Link
                 collapsed: false,
-                associations: parent.associations || []
+                associations: parent.associations || [],
+                status: {}
             });
             prevId = id;
         });
@@ -1158,7 +1173,13 @@ export class AutoDraftAgent {
         return ids;
     }
 
-    private updateNode(id: string, updates: Partial<NodeData>) {
-        this.setNodes(prev => prev.map(n => n.id === id ? { ...n, ...updates } : n));
+    private updateNode(id: string, updates: Partial<NodeData>, statusUpdates?: Record<string, boolean>) {
+        this.setNodes(prev => prev.map(n => {
+            if (n.id === id) {
+                const mergedStatus = statusUpdates ? { ...(n.status || {}), ...statusUpdates } : n.status;
+                return { ...n, ...updates, status: mergedStatus };
+            }
+            return n;
+        }));
     }
 }

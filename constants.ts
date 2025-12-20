@@ -1,5 +1,6 @@
 
 import { NodeType } from './types';
+import { BookOpen, CheckCircle, Database, GitMerge, Layers, ShieldCheck, Sparkles } from 'lucide-react';
 
 export const NODE_COLORS: Record<NodeType, { bg: string; border: string; text: string; label: string }> = {
   [NodeType.ROOT]: { bg: 'bg-purple-950', border: 'border-purple-500', text: 'text-purple-200', label: '世界观/核心设定' },
@@ -21,6 +22,32 @@ export const HIERARCHY_RULES: Record<string, NodeType[]> = {
     [NodeType.ITEM]: [],
     [NodeType.LOCATION]: [],
     [NodeType.FACTION]: []
+};
+
+// NEW: Status Attributes Configuration
+export const NODE_STATUS_CONFIG: Record<string, { key: string; label: string; icon: any }[]> = {
+    [NodeType.ROOT]: [
+        { key: 'opt_quality', label: '世界观校验 (Optimization)', icon: Sparkles },
+        { key: 'res_sync', label: '资源库初始化 (Resource Init)', icon: Database },
+        { key: 'exp_children', label: '分卷规划 (Expansion)', icon: Layers }
+    ],
+    [NodeType.OUTLINE]: [
+        { key: 'val_struct', label: '结构/密度校验 (Struct Check)', icon: ShieldCheck },
+        { key: 'opt_quality', label: '内容精修 (Quality)', icon: Sparkles },
+        { key: 'res_sync', label: '资源同步 (Resource Sync)', icon: Database },
+        { key: 'exp_children', label: '剧情推演 (Expansion)', icon: Layers }
+    ],
+    [NodeType.PLOT]: [
+        { key: 'val_struct', label: '逻辑/节奏校验 (Logic Check)', icon: ShieldCheck },
+        { key: 'opt_quality', label: '内容精修 (Quality)', icon: Sparkles },
+        { key: 'res_sync', label: '资源同步 (Resource Sync)', icon: Database },
+        { key: 'exp_children', label: '章节拆分 (Expansion)', icon: Layers }
+    ],
+    [NodeType.CHAPTER]: [
+        { key: 'con_draft', label: '初稿撰写 (Draft)', icon: BookOpen },
+        { key: 'opt_quality', label: '主编精修 (Polish)', icon: Sparkles },
+        { key: 'val_end', label: '结尾/风格质检 (Ending Check)', icon: ShieldCheck }
+    ]
 };
 
 export const NOVEL_STYLES = [
@@ -64,6 +91,7 @@ export const DEFAULT_NODES = [
     parentId: null,
     childrenIds: [],
     collapsed: false,
-    associations: []
+    associations: [],
+    status: {}
   }
 ];

@@ -23,6 +23,7 @@ export interface NodeData {
     prevNodeId?: string | null;
     collapsed: boolean;
     associations?: string[]; // IDs of associated resources
+    status?: Record<string, boolean>; // NEW: Verification flags
 }
 
 export interface AppSettings {
