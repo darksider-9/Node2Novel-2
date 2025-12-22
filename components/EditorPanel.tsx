@@ -34,6 +34,9 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
   const [showAssociator, setShowAssociator] = useState(false);
   const [loreUpdates, setLoreUpdates] = useState<LoreUpdateSuggestion[]>([]);
   
+  // NEW: Deletion Confirmation State
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
   // NEW: Coverage Analysis Result State
   const [coverageResult, setCoverageResult] = useState<{ missingNodes: { title: string, summary: string, insertAfterId: string | null }[] } | null>(null);
   
@@ -878,7 +881,34 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
       {/* Footer */}
       <div className="p-3 border-t border-slate-800 bg-slate-950 flex justify-between items-center text-[10px] text-slate-600">
           <span className="font-mono opacity-50">{node.id}</span>
-          <button onClick={() => onDelete(node.id)} className="text-red-500 hover:bg-red-900/20 px-2 py-1 rounded flex items-center gap-1 transition"><Trash2 size={12}/> 删除节点</button>
+          
+          {/* Safe Delete with Confirmation */}
+          {node.type !== NodeType.ROOT && (
+              !showDeleteConfirm ? (
+                  <button 
+                      onClick={() => setShowDeleteConfirm(true)} 
+                      className="text-red-500 hover:bg-red-900/20 px-2 py-1 rounded flex items-center gap-1 transition"
+                  >
+                      <Trash2 size={12}/> 删除节点
+                  </button>
+              ) : (
+                  <div className="flex items-center gap-2 animate-in fade-in slide-in-from-right-2">
+                      <span className="text-red-400 font-bold">确定删除?</span>
+                      <button 
+                          onClick={() => { onDelete(node.id); setShowDeleteConfirm(false); }} 
+                          className="bg-red-600 hover:bg-red-500 text-white px-2 py-0.5 rounded font-bold"
+                      >
+                          是
+                      </button>
+                      <button 
+                          onClick={() => setShowDeleteConfirm(false)} 
+                          className="bg-slate-700 hover:bg-slate-600 text-white px-2 py-0.5 rounded"
+                      >
+                          否
+                      </button>
+                  </div>
+              )
+          )}
       </div>
 
     </div>

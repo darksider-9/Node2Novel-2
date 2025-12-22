@@ -1,6 +1,6 @@
 
 import { NodeData, NodeType, AppSettings, AutoDraftConfig, AutoDraftStatus, MilestoneConfig, ExpansionConfig } from '../types';
-import { generateNodeExpansion, refineContent, analyzeAndGenerateFix, batchValidateNodes, applyLogicFixes, generateChapterContent, validateEndingStyle, validateVolumeSpan, autoExtractWorldInfo, associateRelevantResources, consultStructuralArchitect, analyzePlotPacing } from './geminiService';
+import { generateNodeExpansion, refineContent, analyzeAndGenerateFix, batchValidateNodes, validateFullSequence, applyLogicFixes, generateChapterContent, validateEndingStyle, validateVolumeSpan, autoExtractWorldInfo, associateRelevantResources, consultStructuralArchitect, analyzePlotPacing } from './geminiService';
 
 type NodeUpdateFn = (nodes: NodeData[]) => NodeData[];
 
@@ -650,7 +650,7 @@ export class AutoDraftAgent {
                 const finalVolNode = this.getNodes().find(n => n.id === volId);
                 const finalPlotIds = finalVolNode ? this.getNodes().filter(n => finalVolNode.childrenIds.includes(n.id) && n.type === NodeType.PLOT).map(n=>n.id) : [];
 
-                // Batch Validate
+                // Batch Validate + Global Chain Check
                 await this.batchCheckAndFix(finalPlotIds, volId);
 
                 // Individual Optimization + RESOURCE SYNC
@@ -1038,12 +1038,8 @@ export class AutoDraftAgent {
             if (this.stopSignal) break;
             const batchIds = nodeIds.slice(i, i + BATCH_SIZE);
             
+            // Phase 1: Standard Individual/Pairwise check (Logic)
             // Should we skip if all nodes in batch are "val_struct"?
-            // 'val_struct' is the flag for logic check for Plots.
-            // But logic check is holistic (batch). 
-            // We can check if *any* node is unchecked, then run batch.
-            // But batch runs on all.
-            // Let's check if the *last* node in batch is checked. If so, likely done.
             if (this.isNodeDone(batchIds[batchIds.length-1], 'val_struct')) continue;
             
             const allExist = await this.waitForNodes(batchIds, 5000);
@@ -1052,7 +1048,7 @@ export class AutoDraftAgent {
             let attempts = 0;
             let hasConflicts = true;
 
-            this.log(`[逻辑校验] 正在检查第 ${i+1}-${i+batchIds.length} 个节点...`);
+            this.log(`[逻辑校验] 正在检查第 ${i+1}-${Math.min(i+BATCH_SIZE, nodeIds.length)} 个节点 (批次检查)...`);
 
             while(hasConflicts && attempts < 1 && !this.stopSignal) { 
                 attempts++;
@@ -1079,6 +1075,34 @@ export class AutoDraftAgent {
                 }
             }
             
+            // Phase 2: GLOBAL SEQUENCE CHECK (After batch completes)
+            // Perform a holistic check of all nodes generated SO FAR in this container (from index 0 up to current batch end)
+            // This prevents "plot dislocations" over long chains.
+            const nodesSoFarIds = nodeIds.slice(0, i + BATCH_SIZE);
+            const nodesSoFar = this.getNodes().filter(n => nodesSoFarIds.includes(n.id));
+            const parent = this.getNodes().find(n => n.id === parentId);
+            
+            if (parent && nodesSoFar.length > 3) {
+                this.log(`[全局审计] 正在对前 ${nodesSoFar.length} 个节点进行断层与错位检查...`);
+                const fullCheck = await validateFullSequence(nodesSoFar, parent, this.settings);
+                
+                if (fullCheck.hasGap && fullCheck.fixSuggestions.length > 0) {
+                    this.log(`[全局修复] 发现剧情断层: ${fullCheck.gapAnalysis.slice(0, 50)}...`);
+                    for (const sugg of fullCheck.fixSuggestions) {
+                        const targetNode = this.getNodes().find(n => n.id === sugg.targetId);
+                        if (targetNode) {
+                             const rawNewSummary = await applyLogicFixes(targetNode, sugg.instruction, this.settings);
+                             const newSummary = this.sanitizeContent(rawNewSummary);
+                             this.updateNode(targetNode.id, { summary: newSummary, content: targetNode.type !== NodeType.CHAPTER ? newSummary : targetNode.content });
+                             this.log(`[修复执行] 已修正节点: ${targetNode.title}`);
+                             await delay(1000);
+                        }
+                    }
+                } else {
+                    this.log(`[全局审计] 剧情链完整无断层。`);
+                }
+            }
+
             // Mark all in batch as done
             batchIds.forEach(id => this.markNodeDone(id, 'val_struct'));
         }

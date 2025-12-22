@@ -118,10 +118,6 @@ const callOpenAI = async (
 };
 
 // --- NEW AGENT: Content Coverage Analyzer ---
-/**
- * 核心功能：内容覆盖率分析 Agent
- * 分析父节点内容是否已被子节点完全覆盖，并建议缺失的子节点。
- */
 export const analyzeContentCoverage = async (
     parent: NodeData,
     children: NodeData[],
@@ -471,6 +467,68 @@ export const batchValidateNodes = async (
         return JSON.parse(text);
     } catch(e) {
         return { hasConflicts: false, fixes: [] };
+    }
+};
+
+/**
+ * NEW FUNCTION: Enhanced Global Sequence Validation
+ * This performs a holistic check over a long chain of nodes (e.g., after 10 verifications)
+ * to detect "Plot Dislocations" (情节错位) or "Gaps" (断层).
+ */
+export const validateFullSequence = async (
+    nodesToCheck: NodeData[], 
+    parent: NodeData, 
+    settings: AppSettings
+): Promise<{ hasGap: boolean, gapAnalysis: string, fixSuggestions: { targetId: string, instruction: string }[] }> => {
+    
+    // Sort nodes to ensure order is correct (assuming prevNodeId linking)
+    // For simplicity here we assume the array passed in is already ordered or mostly ordered.
+    // If explicit reordering is needed, it should be done by the caller.
+
+    const chainText = nodesToCheck.map((n, i) => 
+        `[SEQ ${i+1}] [ID:${n.id}] [${n.title}]: ${n.summary}`
+    ).join('\n\n');
+
+    const prompt = `
+        角色：【网文连贯性总监】
+        任务：对这一整条剧情链进行【全局连贯性审计】。
+        
+        【背景】：这是属于分卷 "${parent.title}" 的连续剧情点。
+        
+        【待审计的完整剧情链】：
+        ${chainText}
+        
+        **审计重点（防断层与错位）**：
+        1. **空间错位 (Teleportation)**：
+           - 检查主角的位置变化。
+           - 错误范例：SEQ 3 还在"新手村"，SEQ 4 突然在"皇宫"战斗，中间没有任何"赶路"或"传送"的描写。
+        2. **时间/状态断层 (State Gap)**：
+           - 检查主角的状态。
+           - 错误范例：SEQ 5 主角重伤垂死，SEQ 6 主角生龙活虎去打擂台，中间没有"疗伤"情节。
+        3. **因果断裂 (Causality)**：
+           - 错误范例：SEQ 7 拿到了宝箱，SEQ 8 却在寻找宝箱钥匙（顺序反了）。
+
+        如果发现上述严重的断层或错位，请指出具体的节点ID，并给出修复指令。
+        如果整体连贯流畅，返回 hasGap: false。
+
+        **Output JSON Format Required:**
+        { 
+          "hasGap": boolean, 
+          "gapAnalysis": "string (brief explanation of the gap)", 
+          "fixSuggestions": [ 
+             { "targetId": "string (the node that needs to change to bridge the gap)", "instruction": "string (how to modify this node)" } 
+          ] 
+        }
+    `;
+
+    try {
+        const text = await callOpenAI([
+            { role: "system", content: settings.systemInstruction },
+            { role: "user", content: prompt }
+        ], settings, true);
+        return JSON.parse(text);
+    } catch (e) {
+        return { hasGap: false, gapAnalysis: "Check failed", fixSuggestions: [] };
     }
 };
 
