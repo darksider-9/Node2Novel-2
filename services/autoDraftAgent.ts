@@ -815,14 +815,15 @@ export class AutoDraftAgent {
         const parent = this.getNodes().find(n => n.id === parentId);
         if (!parent) return [];
 
-        // UPGRADE: Special Strategy for PLOT Nodes (>=5) AND OUTLINE Nodes (>=3)
-        // Applies "Head & Tail" Strategy
-        if ((type === NodeType.PLOT && totalTargetCount >= 5) || (type === NodeType.OUTLINE && totalTargetCount >= 3)) {
-             return this.generateKeyframesAndFill(parentId, type, totalTargetCount, context);
-        }
-
         const existing = this.getNodes().filter(n => parent.childrenIds.includes(n.id) && n.type === type);
         const createdIds = existing.map(n => n.id);
+
+        // UPGRADE: Special Strategy for PLOT Nodes (>=5) AND OUTLINE Nodes (>=3)
+        // Applies "Head & Tail" Strategy ONLY IF we are starting fresh (empty children).
+        // This prevents weirdness when appending to an existing list.
+        if (createdIds.length === 0 && ((type === NodeType.PLOT && totalTargetCount >= 5) || (type === NodeType.OUTLINE && totalTargetCount >= 3))) {
+             return this.generateKeyframesAndFill(parentId, type, totalTargetCount, context);
+        }
 
         while(createdIds.length < totalTargetCount && !this.stopSignal) {
             const batchSize = 5;
@@ -955,11 +956,39 @@ export class AutoDraftAgent {
             }
         }
         
-        // Return all children of parent, sorted
+        // 3. Final Count Check & Fallback Fill
+        // This handles cases where Keyframe/Infill logic yielded fewer nodes than requested
         const finalParent = this.getNodes().find(n => n.id === parentId);
         const allChildren = this.getNodes().filter(n => finalParent?.childrenIds.includes(n.id) && n.type === type);
         
-        return allChildren.map(n => n.id);
+        if (allChildren.length < totalTargetCount) {
+            this.log(`[数量补齐] 当前节点数 ${allChildren.length} < 目标 ${totalTargetCount}，正在执行线性补齐...`);
+            
+            const remaining = totalTargetCount - allChildren.length;
+            const lastId = allChildren.length > 0 ? allChildren[allChildren.length - 1].id : null;
+            const lastNode = lastId ? this.getNodes().find(n => n.id === lastId) : parent;
+            
+            // Linear append for the missing ones
+             const fillData = await generateNodeExpansion({
+                currentNode: lastNode!,
+                parentContext: parent,
+                prevContext: lastNode!,
+                globalContext: this.getFullContext(parent),
+                settings: this.settings,
+                task: 'CONTINUE', // Continue from last
+                milestoneConfig: { totalPoints: remaining, generateCount: remaining, strategy: 'linear' },
+                structuralContext: context
+            });
+            
+            if (fillData.length > 0) {
+                const newIds = this.addNodesToState(parentId, fillData, lastId || undefined); 
+                await this.waitForNodes(newIds);
+            }
+        }
+
+        // Return all children of parent, sorted
+        const finalParentRefetched = this.getNodes().find(n => n.id === parentId);
+        return this.getNodes().filter(n => finalParentRefetched?.childrenIds.includes(n.id) && n.type === type).map(n => n.id);
     }
 
     private async writeChapter(chapterId: string, vIdx: number, pIdx: number, cIdx: number) {
