@@ -650,7 +650,7 @@ export class AutoDraftAgent {
                 const finalVolNode = this.getNodes().find(n => n.id === volId);
                 const finalPlotIds = finalVolNode ? this.getNodes().filter(n => finalVolNode.childrenIds.includes(n.id) && n.type === NodeType.PLOT).map(n=>n.id) : [];
 
-                // Batch Validate + Global Chain Check
+                // Batch Validate + Global Chain Check (Moved inside function logic)
                 await this.batchCheckAndFix(finalPlotIds, volId);
 
                 // Individual Optimization + RESOURCE SYNC
@@ -1067,6 +1067,10 @@ export class AutoDraftAgent {
             if (this.stopSignal) break;
             const batchIds = nodeIds.slice(i, i + BATCH_SIZE);
             
+            // CONTEXT OVERLAP: Get last 2 nodes from previous batch as read-only context
+            const prevContextIds = i >= 2 ? nodeIds.slice(i - 2, i) : [];
+            const prevContextNodes = this.getNodes().filter(n => prevContextIds.includes(n.id));
+
             // Phase 1: Standard Individual/Pairwise check (Logic)
             // Should we skip if all nodes in batch are "val_struct"?
             if (this.isNodeDone(batchIds[batchIds.length-1], 'val_struct')) continue;
@@ -1077,7 +1081,7 @@ export class AutoDraftAgent {
             let attempts = 0;
             let hasConflicts = true;
 
-            this.log(`[逻辑校验] 正在检查第 ${i+1}-${Math.min(i+BATCH_SIZE, nodeIds.length)} 个节点 (批次检查)...`);
+            this.log(`[逻辑校验] 正在检查第 ${i+1}-${Math.min(i+BATCH_SIZE, nodeIds.length)} 个节点 (含重叠上下文)...`);
 
             while(hasConflicts && attempts < 1 && !this.stopSignal) { 
                 attempts++;
@@ -1085,7 +1089,7 @@ export class AutoDraftAgent {
                 const parent = this.getNodes().find(n => n.id === parentId);
                 if (!parent) break;
 
-                const result = await batchValidateNodes(nodesToCheck, parent, this.getFullContext(parent), this.settings);
+                const result = await batchValidateNodes(nodesToCheck, parent, prevContextNodes, this.getFullContext(parent), this.settings);
 
                 if (result.hasConflicts && result.fixes.length > 0) {
                     this.log(`[逻辑修复] 发现 ${result.fixes.length} 个问题，正在修正...`);
@@ -1093,9 +1097,21 @@ export class AutoDraftAgent {
                         if (this.stopSignal) break;
                         const node = this.getNodes().find(n => n.id === fix.id);
                         if (node) {
-                            const rawNewSummary = await applyLogicFixes(node, fix.instruction, this.settings);
-                            const newSummary = this.sanitizeContent(rawNewSummary);
-                            this.updateNode(node.id, { summary: newSummary, content: node.type !== NodeType.CHAPTER ? newSummary : node.content });
+                            // Fix now returns { title, summary }
+                            const fixResult = await applyLogicFixes(node, fix.instruction, this.settings);
+                            const newSummary = this.sanitizeContent(fixResult.summary);
+                            
+                            // Check if title was updated
+                            const updates: Partial<NodeData> = { 
+                                summary: newSummary, 
+                                content: node.type !== NodeType.CHAPTER ? newSummary : node.content 
+                            };
+                            if (fix.newTitle || fixResult.title !== node.title) {
+                                updates.title = fix.newTitle || fixResult.title;
+                                this.log(`[标题更新] ${node.title} -> ${updates.title}`);
+                            }
+
+                            this.updateNode(node.id, updates);
                             await delay(1000);
                         }
                     }
@@ -1104,36 +1120,44 @@ export class AutoDraftAgent {
                 }
             }
             
-            // Phase 2: GLOBAL SEQUENCE CHECK (After batch completes)
-            // Perform a holistic check of all nodes generated SO FAR in this container (from index 0 up to current batch end)
-            // This prevents "plot dislocations" over long chains.
-            const nodesSoFarIds = nodeIds.slice(0, i + BATCH_SIZE);
-            const nodesSoFar = this.getNodes().filter(n => nodesSoFarIds.includes(n.id));
-            const parent = this.getNodes().find(n => n.id === parentId);
-            
-            if (parent && nodesSoFar.length > 3) {
-                this.log(`[全局审计] 正在对前 ${nodesSoFar.length} 个节点进行断层与错位检查...`);
-                const fullCheck = await validateFullSequence(nodesSoFar, parent, this.settings);
-                
-                if (fullCheck.hasGap && fullCheck.fixSuggestions.length > 0) {
-                    this.log(`[全局修复] 发现剧情断层: ${fullCheck.gapAnalysis.slice(0, 50)}...`);
-                    for (const sugg of fullCheck.fixSuggestions) {
-                        const targetNode = this.getNodes().find(n => n.id === sugg.targetId);
-                        if (targetNode) {
-                             const rawNewSummary = await applyLogicFixes(targetNode, sugg.instruction, this.settings);
-                             const newSummary = this.sanitizeContent(rawNewSummary);
-                             this.updateNode(targetNode.id, { summary: newSummary, content: targetNode.type !== NodeType.CHAPTER ? newSummary : targetNode.content });
-                             this.log(`[修复执行] 已修正节点: ${targetNode.title}`);
-                             await delay(1000);
-                        }
-                    }
-                } else {
-                    this.log(`[全局审计] 剧情链完整无断层。`);
-                }
-            }
-
             // Mark all in batch as done
             batchIds.forEach(id => this.markNodeDone(id, 'val_struct'));
+        }
+
+        // Phase 2: GLOBAL SEQUENCE CHECK (After ALL batches are done for this parent)
+        // This is now OUTSIDE the loop, running once for the entire sequence.
+        const parent = this.getNodes().find(n => n.id === parentId);
+        const allChildren = this.getNodes().filter(n => nodeIds.includes(n.id));
+        
+        if (parent && allChildren.length > 3) {
+            this.log(`[全局审计] 正在对分卷 "${parent.title}" 的所有剧情点进行最终断层检查...`);
+            const fullCheck = await validateFullSequence(allChildren, parent, this.settings);
+            
+            if (fullCheck.hasGap && fullCheck.fixSuggestions.length > 0) {
+                this.log(`[全局修复] 发现剧情断层: ${fullCheck.gapAnalysis.slice(0, 50)}...`);
+                for (const sugg of fullCheck.fixSuggestions) {
+                    const targetNode = this.getNodes().find(n => n.id === sugg.targetId);
+                    if (targetNode) {
+                            const fixResult = await applyLogicFixes(targetNode, sugg.instruction, this.settings);
+                            const newSummary = this.sanitizeContent(fixResult.summary);
+                            
+                            const updates: Partial<NodeData> = { 
+                                summary: newSummary, 
+                                content: targetNode.type !== NodeType.CHAPTER ? newSummary : targetNode.content 
+                            };
+                            if (sugg.newTitle || fixResult.title !== targetNode.title) {
+                                updates.title = sugg.newTitle || fixResult.title;
+                                this.log(`[标题更新] ${targetNode.title} -> ${updates.title}`);
+                            }
+
+                            this.updateNode(targetNode.id, updates);
+                            this.log(`[修复执行] 已修正节点: ${updates.title}`);
+                            await delay(1000);
+                    }
+                }
+            } else {
+                this.log(`[全局审计] 剧情链完整无断层。`);
+            }
         }
     }
 

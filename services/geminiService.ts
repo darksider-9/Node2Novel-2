@@ -405,9 +405,10 @@ export const validateVolumeSpan = async (
 export const batchValidateNodes = async (
     nodesToCheck: NodeData[],
     parent: NodeData,
+    prevNodesContext: NodeData[], // NEW: Overlap context
     globalContext: string,
     settings: AppSettings
-): Promise<{ hasConflicts: boolean; fixes: { id: string; instruction: string }[] }> => {
+): Promise<{ hasConflicts: boolean; fixes: { id: string; instruction: string; newTitle?: string }[] }> => {
     
     // Determine strictness based on node type
     const nodeType = nodesToCheck[0]?.type;
@@ -428,6 +429,16 @@ export const batchValidateNodes = async (
         `;
     }
 
+    // Construct Context Text
+    let prevContextText = "";
+    if (prevNodesContext && prevNodesContext.length > 0) {
+        prevContextText = `
+        【前序剧情 (Context Only)】:
+        ${prevNodesContext.map(n => `[ID:${n.id}] ${n.title}: ${n.summary}`).join('\n')}
+        (These nodes are provided for continuity context. Do not fix them.)
+        `;
+    }
+
     const nodesText = nodesToCheck.map((n) => 
         `[ID: ${n.id}] [Type: ${n.type}]\nTITLE: ${n.title}\nCONTENT LENGTH: ${n.summary.length} chars\nCONTENT: ${n.summary}`
     ).join('\n----------------\n');
@@ -439,23 +450,27 @@ export const batchValidateNodes = async (
         【全局设定】：${globalContext}
         【上级大纲 (Parent)】：${parent.title} - ${parent.summary}
         
+        ${prevContextText}
+
         【待检查的节点链 (Batch)】：
         ${nodesText}
         
         ${strictRules}
         
         请进行审查，寻找以下问题：
-        1. **逻辑断层**：前一个节点的结局是否自然引发下一个节点的开端？
+        1. **逻辑断层**：前一个节点的结局是否自然引发下一个节点的开端？(Reference '前序剧情' for the start of the batch).
         2. **格式错误 (重点)**：如果 PLOT 节点写成了小说正文（含对话/描写），必须报错，要求改为“流水账事件表”。
+        3. **标题冲突**：如果内容与标题不符，或者为了修复逻辑导致内容大变，必须提供新的标题。
         
         **输出要求**：
         - 只有发现明显逻辑硬伤或关键缺失时才生成修复指令。
         - **Fix Instruction (指令)**：必须是针对性的修改建议。
+        - **Title Update**: If the fix implies a change in the event's nature, provide a 'newTitle'.
 
         **Output JSON Format Required:**
         { 
           "hasConflicts": boolean, 
-          "fixes": [ { "id": "string", "instruction": "string" } ] 
+          "fixes": [ { "id": "string", "instruction": "string", "newTitle": "string (optional)" } ] 
         }
     `;
 
@@ -479,12 +494,8 @@ export const validateFullSequence = async (
     nodesToCheck: NodeData[], 
     parent: NodeData, 
     settings: AppSettings
-): Promise<{ hasGap: boolean, gapAnalysis: string, fixSuggestions: { targetId: string, instruction: string }[] }> => {
+): Promise<{ hasGap: boolean, gapAnalysis: string, fixSuggestions: { targetId: string, instruction: string, newTitle?: string }[] }> => {
     
-    // Sort nodes to ensure order is correct (assuming prevNodeId linking)
-    // For simplicity here we assume the array passed in is already ordered or mostly ordered.
-    // If explicit reordering is needed, it should be done by the caller.
-
     const chainText = nodesToCheck.map((n, i) => 
         `[SEQ ${i+1}] [ID:${n.id}] [${n.title}]: ${n.summary}`
     ).join('\n\n');
@@ -499,24 +510,19 @@ export const validateFullSequence = async (
         ${chainText}
         
         **审计重点（防断层与错位）**：
-        1. **空间错位 (Teleportation)**：
-           - 检查主角的位置变化。
-           - 错误范例：SEQ 3 还在"新手村"，SEQ 4 突然在"皇宫"战斗，中间没有任何"赶路"或"传送"的描写。
-        2. **时间/状态断层 (State Gap)**：
-           - 检查主角的状态。
-           - 错误范例：SEQ 5 主角重伤垂死，SEQ 6 主角生龙活虎去打擂台，中间没有"疗伤"情节。
-        3. **因果断裂 (Causality)**：
-           - 错误范例：SEQ 7 拿到了宝箱，SEQ 8 却在寻找宝箱钥匙（顺序反了）。
+        1. **空间错位 (Teleportation)**：检查主角的位置变化。错误范例：SEQ 3 还在"新手村"，SEQ 4 突然在"皇宫"战斗。
+        2. **时间/状态断层 (State Gap)**：检查主角的状态。错误范例：SEQ 5 重伤，SEQ 6 生龙活虎。
+        3. **因果断裂 (Causality)**：顺序错误或无因果。
 
-        如果发现上述严重的断层或错位，请指出具体的节点ID，并给出修复指令。
-        如果整体连贯流畅，返回 hasGap: false。
+        如果发现严重的断层或错位，请指出具体的节点ID，并给出修复指令。
+        **如果修复内容会导致标题不再适用，请提供 'newTitle'。**
 
         **Output JSON Format Required:**
         { 
           "hasGap": boolean, 
-          "gapAnalysis": "string (brief explanation of the gap)", 
+          "gapAnalysis": "string", 
           "fixSuggestions": [ 
-             { "targetId": "string (the node that needs to change to bridge the gap)", "instruction": "string (how to modify this node)" } 
+             { "targetId": "string", "instruction": "string", "newTitle": "string (optional)" } 
           ] 
         }
     `;
@@ -532,8 +538,34 @@ export const validateFullSequence = async (
     }
 };
 
-export const applyLogicFixes = async (node: NodeData, instruction: string, settings: AppSettings): Promise<string> => {
-    return await refineContent(node.summary, `【逻辑修复请求】\n针对问题：${instruction}\n请微调当前摘要以修复此逻辑问题。保留原有的核心事件，仅修改有问题的地方。`, settings);
+export const applyLogicFixes = async (node: NodeData, instruction: string, settings: AppSettings): Promise<{ title: string, summary: string }> => {
+    const prompt = `
+        任务：【逻辑/内容修复】
+        
+        【原节点】：
+        标题：${node.title}
+        内容：${node.summary}
+        
+        【修复指令】：${instruction}
+        
+        请根据指令重写内容。
+        **如果修改后的内容与原标题严重冲突，请同时提供一个新的标题。**
+        如果原标题仍然适用，保持原标题。
+        
+        **Output JSON Format Required:**
+        { "title": "string", "summary": "string" }
+    `;
+    
+    try {
+        const text = await callOpenAI([
+            { role: "system", content: settings.systemInstruction },
+            { role: "user", content: prompt }
+        ], settings, true);
+        const res = JSON.parse(text);
+        return { title: res.title || node.title, summary: res.summary || node.summary };
+    } catch (e) {
+        return { title: node.title, summary: node.summary }; // Fallback
+    }
 };
 
 // --- NEW: Smart Optimization Prompt Generator ---
