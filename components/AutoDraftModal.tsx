@@ -1,14 +1,15 @@
 
-import React, { useState, useRef } from 'react';
-import { AutoDraftConfig, GenerationDepth } from '../types';
-import { Bot, Play, X, Sliders, FileText, Activity, LayoutTemplate, Upload, Layers, ListTree, BookOpen, PenTool } from 'lucide-react';
+import React, { useState, useRef, useMemo } from 'react';
+import { AutoDraftConfig, GenerationDepth, GenerationStrategy, NodeData, NodeType } from '../types';
+import { Bot, Play, X, Sliders, FileText, Activity, LayoutTemplate, Upload, Layers, ListTree, BookOpen, PenTool, GitMerge, ArrowDown, CheckSquare, Square } from 'lucide-react';
 
 interface AutoDraftModalProps {
     onStart: (config: AutoDraftConfig) => void;
     onClose: () => void;
+    nodes?: NodeData[]; // Pass nodes to know available volumes
 }
 
-const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => {
+const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose, nodes = [] }) => {
     const [config, setConfig] = useState<AutoDraftConfig>({
         idea: '',
         volumeCount: 3,
@@ -19,15 +20,23 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
         recoveryLogs: '',
         enablePlotAnalysis: true,
         pacing: 'Normal',
-        targetDepth: 'PROSE' // Default to full generation
+        targetDepth: 'PROSE', // Default to full generation
+        generationStrategy: 'linear_batch', // Default strategy
+        selectedVolumeIds: [] // Default: All (empty means all)
     });
     
     const [showRecovery, setShowRecovery] = useState(false);
     const [fileName, setFileName] = useState<string>('');
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    // Extract available volumes
+    const availableVolumes = useMemo(() => {
+        return nodes.filter(n => n.type === NodeType.OUTLINE).sort((a,b) => a.y - b.y);
+    }, [nodes]);
+
     // Estimate based on inputs (rough estimate if dynamic is on)
-    const totalChapters = config.volumeCount * config.plotPointsPerVolume * config.chaptersPerPlot;
+    const effectiveVolumeCount = (config.selectedVolumeIds && config.selectedVolumeIds.length > 0) ? config.selectedVolumeIds.length : config.volumeCount;
+    const totalChapters = effectiveVolumeCount * config.plotPointsPerVolume * config.chaptersPerPlot;
 
     const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -42,11 +51,26 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
         }
     };
 
+    const toggleVolumeSelection = (id: string) => {
+        const current = config.selectedVolumeIds || [];
+        if (current.includes(id)) {
+            setConfig({ ...config, selectedVolumeIds: current.filter(vid => vid !== id) });
+        } else {
+            setConfig({ ...config, selectedVolumeIds: [...current, id] });
+        }
+    };
+
     const depths: { id: GenerationDepth; label: string; icon: React.ReactNode; desc: string }[] = [
         { id: 'OUTLINE', label: '1. 分卷规划', icon: <Layers size={14}/>, desc: '仅生成大副本/分卷结构' },
         { id: 'PLOT', label: '2. 剧情推演', icon: <ListTree size={14}/>, desc: '生成具体事件流 (Plot)' },
         { id: 'CHAPTER', label: '3. 章节细纲', icon: <BookOpen size={14}/>, desc: '生成章节标题与摘要' },
         { id: 'PROSE', label: '4. 全书正文', icon: <PenTool size={14}/>, desc: '撰写完整小说内容' },
+    ];
+
+    const strategies: { id: GenerationStrategy; label: string; icon: React.ReactNode; desc: string }[] = [
+        { id: 'linear_batch', label: '线性连贯生成 (Linear)', icon: <ArrowDown size={14}/>, desc: '默认。顺序生成剧情点，逻辑连贯性最强。' },
+        { id: 'one_pass', label: '一次性全量生成 (One-Pass)', icon: <LayoutTemplate size={14}/>, desc: '强连贯。一次性生成整卷剧情，避免碎片化，但细节可能较少。' },
+        { id: 'spanning', label: '关键帧插值 (Spanning)', icon: <GitMerge size={14}/>, desc: '先定开头结尾，再填补中间。适合结构感强、但中间细节可变的故事。' },
     ];
 
     return (
@@ -96,6 +120,60 @@ const AutoDraftModal: React.FC<AutoDraftModalProps> = ({ onStart, onClose }) => 
                             ))}
                         </div>
                     </div>
+
+                    {/* Strategy Selection */}
+                    <div className="space-y-2">
+                        <label className="text-xs font-bold uppercase text-slate-500 flex items-center gap-2">
+                            <Activity size={14}/> 剧情推演策略 (Strategy)
+                        </label>
+                        <div className="grid grid-cols-1 gap-2">
+                            {strategies.map(s => (
+                                <button
+                                    key={s.id}
+                                    onClick={() => setConfig({...config, generationStrategy: s.id})}
+                                    className={`p-3 rounded-lg border text-left transition flex items-center gap-3 ${config.generationStrategy === s.id ? 'bg-emerald-900/30 border-emerald-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-750'}`}
+                                >
+                                    <div className={`p-2 rounded-full ${config.generationStrategy === s.id ? 'bg-emerald-600' : 'bg-slate-700'}`}>
+                                        {s.icon}
+                                    </div>
+                                    <div>
+                                        <div className="text-xs font-bold">{s.label}</div>
+                                        <div className="text-[9px] opacity-70">{s.desc}</div>
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* NEW: Volume Scope Selection */}
+                    {availableVolumes.length > 0 && (
+                        <div className="bg-slate-900 border border-slate-700 rounded-xl p-3 space-y-2">
+                            <label className="text-xs font-bold uppercase text-slate-500 flex items-center justify-between">
+                                <span className="flex items-center gap-2"><Layers size={14}/> 目标分卷 (Scope)</span>
+                                <span className="text-[9px] bg-slate-800 px-2 py-0.5 rounded text-slate-400">
+                                    {config.selectedVolumeIds?.length || 0} / {availableVolumes.length} 选中
+                                </span>
+                            </label>
+                            <div className="max-h-32 overflow-y-auto custom-scrollbar border border-slate-800 rounded-lg p-1 bg-slate-950/50">
+                                {availableVolumes.map(vol => {
+                                    const isSelected = config.selectedVolumeIds?.includes(vol.id);
+                                    return (
+                                        <div 
+                                            key={vol.id} 
+                                            onClick={() => toggleVolumeSelection(vol.id)}
+                                            className={`flex items-center gap-2 p-2 rounded cursor-pointer transition text-xs ${isSelected ? 'bg-indigo-900/30 text-indigo-200' : 'hover:bg-slate-800 text-slate-400'}`}
+                                        >
+                                            {isSelected ? <CheckSquare size={14} className="text-indigo-500"/> : <Square size={14}/>}
+                                            <span className="truncate">{vol.title}</span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            <p className="text-[9px] text-slate-500 text-center italic">
+                                {(!config.selectedVolumeIds || config.selectedVolumeIds.length === 0) ? "未选择任何分卷，将自动处理所有现有分卷或生成新分卷。" : "仅针对选中的分卷生成剧情点和章节。"}
+                            </p>
+                        </div>
+                    )}
 
                     {/* Plot Analysis Agent Section */}
                     <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 space-y-3">

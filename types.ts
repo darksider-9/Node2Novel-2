@@ -42,10 +42,13 @@ export interface ExpansionConfig {
     wordCount?: string | number;
 }
 
+// NEW: Generation Strategy Enum
+export type GenerationStrategy = 'linear_batch' | 'spanning' | 'one_pass';
+
 export interface MilestoneConfig {
     totalPoints: number;
     generateCount: number;
-    strategy?: 'linear' | 'spanning'; // NEW: Support keyframe generation
+    strategy?: GenerationStrategy; // UPDATED: Support strict strategies
 }
 
 export interface AIRequestParams {
@@ -96,15 +99,21 @@ export interface AutoDraftConfig {
     plotPointsPerVolume: number;
     chaptersPerPlot: number;
     wordCountPerChapter: number;
-    minEffectiveLength: number; // NEW: Threshold for "quality check"
-    recoveryLogs?: string; // NEW: Paste logs to resume progress
+    minEffectiveLength: number; // Threshold for "quality check"
+    recoveryLogs?: string; // Paste logs to resume progress
     
-    // NEW: Plot Analysis Agent Config
+    // Plot Analysis Agent Config
     enablePlotAnalysis?: boolean;
     pacing?: 'Fast' | 'Normal' | 'Slow'; 
     
-    // NEW: Generation Depth Control
+    // Generation Depth Control
     targetDepth: GenerationDepth;
+
+    // NEW: Strategy Control
+    generationStrategy: GenerationStrategy;
+
+    // NEW: Scope Control
+    selectedVolumeIds?: string[]; // If set, only process these volumes
 }
 
 export interface AutoDraftStatus {

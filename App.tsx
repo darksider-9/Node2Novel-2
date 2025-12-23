@@ -407,7 +407,7 @@ const App: React.FC = () => {
           setNodes(initialNodes); // Single node needs no layout
           setIsInitialized(true);
           
-          // Pass newSettings explicitly to avoid closure stale state
+          // Pass newSettings explicitly to avoid stale closure state
           triggerWorldAnalysis(initialWorldview, rootNode.id, newSettings);
 
       } catch (error) {
@@ -714,6 +714,7 @@ const App: React.FC = () => {
           <AutoDraftModal 
               onStart={handleStartAutoDraft} 
               onClose={() => setShowAutoDraftModal(false)}
+              nodes={nodes}
           />
       )}
 

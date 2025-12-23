@@ -116,16 +116,22 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
   // ---------------- Handlers ----------------
 
   // NEW: Content Coverage Analysis
-  const handleCoverageAnalysis = async () => {
+    const handleCoverageAnalysis = async () => {
       if (children.length === 0) {
           alert("该功能仅在已有子节点时可用，用于检查子节点内容是否全面覆盖了父级大纲。");
           return;
       }
       setGlobalLoading(true);
       try {
-          const result = await analyzeContentCoverage(node, children, settings);
+          // <--- 1. 获取下一个兄弟节点 (Next Sibling)
+          // 逻辑是：在 nodes 数组中找到 prevNodeId 等于当前 node.id 的那个节点
+          const nextNode = nodes.find(n => n.prevNodeId === node.id);
+
+          // <--- 2. 传入 analyzeContentCoverage (注意第四个参数 nextNode)
+          const result = await analyzeContentCoverage(node, children, settings, nextNode);
+          
           if (result.missingNodes.length === 0) {
-              alert("分析完成：子节点已完美覆盖父级内容！");
+              alert("分析完成：子节点已完美覆盖父级内容，且衔接顺畅！");
           } else {
               // Show Modal instead of confirm
               setCoverageResult(result);
@@ -135,8 +141,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
       } finally {
           setGlobalLoading(false);
       }
-  };
-
+    };
   const handleApplyCoverageFix = () => {
       if (!coverageResult) return;
       coverageResult.missingNodes.forEach(missing => {
@@ -239,7 +244,7 @@ const EditorPanel: React.FC<EditorPanelProps> = ({ node, nodes, settings, storyC
                             globalContext: getContext(),
                             settings,
                             task: 'CONTINUE', // Infill task
-                            milestoneConfig: { totalPoints: countForGap, generateCount: countForGap, strategy: 'linear' }
+                            milestoneConfig: { totalPoints: countForGap, generateCount: countForGap, strategy: 'linear_batch' }
                        });
                        
                        finalSequence.push(...infillNodes);

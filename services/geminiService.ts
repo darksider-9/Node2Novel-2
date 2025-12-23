@@ -118,19 +118,35 @@ const callOpenAI = async (
 };
 
 // --- NEW AGENT: Content Coverage Analyzer ---
+
 export const analyzeContentCoverage = async (
     parent: NodeData,
     children: NodeData[],
-    settings: AppSettings
+    settings: AppSettings,
+    nextSibling?: NodeData // <--- 1. 新增这个参数
 ): Promise<{ missingNodes: { title: string, summary: string, insertAfterId: string | null }[] }> => {
+    
     const childrenText = children.map((c, i) => `[节点 ${i + 1} ID:${c.id}] ${c.title}: ${c.summary}`).join('\n');
     
+    // <--- 2. 新增：构建下一卷/下一阶段的上下文字符串
+    let nextContextStr = "";
+    if (nextSibling) {
+        nextContextStr = `
+        【下一卷/下一阶段大纲 (Next Context)】：
+        标题：${nextSibling.title}
+        大纲：${nextSibling.summary}
+        (注意：本卷/本阶段的结局必须自然过渡到下一阶段的开篇，不能出现严重的割裂。) 
+        `;
+    }
+
     const prompt = `
         角色：【网文逻辑审计师】
-        任务：对比“父级总纲”与“已生成的子节点列表”，检查是否存在剧情断层或内容缺失。
+        任务：对比“父级总纲”与“已生成的子节点列表”，检查是否存在剧情断层或内容缺失。 
         
         【父级总纲】：${parent.title} - ${parent.summary}
         
+        ${nextContextStr}  // <--- 插入上下文
+
         【当前已有的子节点列表】：
         ${childrenText}
         
@@ -138,9 +154,11 @@ export const analyzeContentCoverage = async (
         1. **覆盖率检查**：父级总纲中提到的每一个关键事件、冲突、转折点，是否都在子节点中得到了体现？
         2. **逻辑连续性**：相邻子节点之间是否存在明显的逻辑跳跃（例如从A地直接跳到了B地，但中间没有任何过程描述）？
         3. **非重复性**：不要对已经有的节点进行改动，只寻找缺失的部分。
+        4. **【境界一致性】(Realm Continuity)**：注意主角的境界是否是连贯的，不能出现境界的突然变化（突破除外）。如果发现剧情中缺少了必要的修炼或突破铺垫导致境界跳跃，请生成缺失的节点进行补全。
+        5. **【承上启下】(Bridging)**：如果提供了【下一卷/下一阶段大纲】，请重点检查最后一个子节点是否为下一卷做好了铺垫。如果结局戛然而止无法衔接，请生成一个过渡节点（如“整顿收获，前往新地图”）。
         
         **输出要求**：
-        - 如果发现父级中有内容未被子级覆盖，请生成新的子节点来填补空隙。
+        - 如果发现父级中有内容未被子级覆盖，或需要补充过渡剧情，请生成新的子节点来填补空隙。
         - 明确指出新节点应该插入在哪个已有节点 ID 之后（insertAfterId）。如果是插在开头，该值为 null。
         - 仅输出确实缺失的部分。如果没有缺失，返回空数组。
 
@@ -408,7 +426,7 @@ export const batchValidateNodes = async (
     prevNodesContext: NodeData[], // NEW: Overlap context
     globalContext: string,
     settings: AppSettings
-): Promise<{ hasConflicts: boolean; fixes: { id: string; instruction: string; newTitle?: string }[] }> => {
+): Promise<{ hasConflicts: boolean; fixes: { id: string; instruction: string; newTitle?: string; delete?: boolean }[] }> => {
     
     // Determine strictness based on node type
     const nodeType = nodesToCheck[0]?.type;
@@ -419,13 +437,14 @@ export const batchValidateNodes = async (
         **[分卷大纲 (OUTLINE) 审查标准]**
         1. **事件广度**：每个分卷大纲必须包含大量发生的事件（Events），而不是单一场景的描写（Scene）。
         2. **地图跨越**：必须明确描述至少 1 次大的【地区/地图跨越】。
+        3. **重复性检查**：如果发现两个分卷内容高度重复，请建议【删除 (delete)】其中一个。
         `;
     } else if (nodeType === NodeType.PLOT) {
         strictRules = `
         **[剧情详纲 (PLOT) 审查标准]**
         1. **严禁写成正文**：如果内容包含大量对话、心理活动描写或环境白描，视为严重错误！
         2. **必须是流水账**：必须以“地点-人物-事件”的格式列出该节点发生的一系列动作。
-        3. **事件列表**：检查是否像流水账一样列出了多个事件点。如果是单一场景的深度描写，视为违规。
+        3. **删减冗余**：如果某个剧情点完全是注水（如“主角吃饭睡觉”且无后续伏笔），或者与上下文严重脱节，请建议【删除 (delete)】。
         `;
     }
 
@@ -444,7 +463,7 @@ export const batchValidateNodes = async (
     ).join('\n----------------\n');
 
     const prompt = `
-        角色：【逻辑精修师】
+        角色：【逻辑精修与裁撤师】
         任务：检查以下一组连续剧情节点的逻辑连贯性与质量。
         
         【全局设定】：${globalContext}
@@ -458,19 +477,21 @@ export const batchValidateNodes = async (
         ${strictRules}
         
         请进行审查，寻找以下问题：
-        1. **逻辑断层**：前一个节点的结局是否自然引发下一个节点的开端？(Reference '前序剧情' for the start of the batch).
+        1. **逻辑断层**：前一个节点的结局是否自然引发下一个节点的开端？
         2. **格式错误 (重点)**：如果 PLOT 节点写成了小说正文（含对话/描写），必须报错，要求改为“流水账事件表”。
-        3. **标题冲突**：如果内容与标题不符，或者为了修复逻辑导致内容大变，必须提供新的标题。
+        3. **废话裁撤**：如果节点无意义，建议删除。
         
         **输出要求**：
-        - 只有发现明显逻辑硬伤或关键缺失时才生成修复指令。
-        - **Fix Instruction (指令)**：必须是针对性的修改建议。
-        - **Title Update**: If the fix implies a change in the event's nature, provide a 'newTitle'.
+        - **Fix Instruction (指令)**：针对性的修改建议。
+        - **Delete (删除)**：如果该节点应该被移除，设置 "delete": true。
+        - **Title Update**: 如果修复内容导致标题变化，提供 'newTitle'。
 
         **Output JSON Format Required:**
         { 
           "hasConflicts": boolean, 
-          "fixes": [ { "id": "string", "instruction": "string", "newTitle": "string (optional)" } ] 
+          "fixes": [ 
+             { "id": "string", "instruction": "string", "newTitle": "string (optional)", "delete": boolean (optional) } 
+          ] 
         }
     `;
 
@@ -582,6 +603,16 @@ export const analyzeAndGenerateFix = async (
     let role = "主编";
     let focus = "";
     
+    // STRICT CONSTANT (Anti-Drift)
+    const CONSISTENCY_RULE = `
+    **【防漂移铁律 (Anti-Drift)】**:
+    1. **锚定现状**：严禁改变原节点中已确定的核心事件走向，除非完全不合逻辑。你的任务是“丰富细节”，不是“重写故事”。
+    2. **战力锚定 (Critical)**：严格维持主角【战力境界】的连续性。
+       - 如果原文没写“突破”，扩写时绝不能写突破。
+       - 如果原文是“凡人”，绝不能扩写成“一拳打爆星球”。
+       - **必须与上下文保持一致**。
+    `;
+
     // Layer-aware focus
     switch (node.type) {
         case NodeType.ROOT:
@@ -671,9 +702,10 @@ export const analyzeAndGenerateFix = async (
     ... (Length: ${(node.type === NodeType.CHAPTER ? node.content : node.summary).length} chars)
     
     ${focus}
+    ${CONSISTENCY_RULE}
     
     【判定逻辑】：
-    请判断当前 Draft 是否满足高质量标准（字数 > ${targetWordCount} 且 包含上述重点要素）。
+    请判断当前 Draft 是否满足高质量标准（字数 > ${targetWordCount} 且 包含上述重点要素 且 符合防漂移铁律）。
     
     如果 **不满足**，请生成一条 **专用修补/写作指令 (Instruction)**。
     这条指令将被发送给 AI 写手，要求其基于 Context 和 Draft 进行重写或扩写。
@@ -709,7 +741,7 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
 
   // Count to generate
   const count = (milestoneConfig?.generateCount || expansionConfig?.chapterCount || 1);
-  const isSingleGeneration = count === 1;
+  const strategy = milestoneConfig?.strategy || 'linear_batch'; // Updated strategy check
 
   // --- Construct Position Context String ---
   let positionInfo = "";
@@ -720,18 +752,26 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
       if (structuralContext.globalChapterIndex) positionInfo += ` (全书第 ${structuralContext.globalChapterIndex} 章)`;
   }
 
+  // NEW: Strict Realm Constraint
+  const REALM_CONSTRAINT = `
+  **【战力境界铁律】(CRITICAL)**：
+  1. 必须明确主角当前的战力境界。
+  2. 严禁无逻辑地跨大境界杀敌。
+  3. 严禁在无前置铺垫的情况下突然升级。如果原文没写突破，这里也不要写。
+  `;
+
   let taskPrompt = "";
   if (task === 'EXPAND') {
       // CASE 1: ROOT -> OUTLINE
       if (currentNode.type === NodeType.ROOT) {
-           const isSpanningStrategy = milestoneConfig?.strategy === 'spanning';
+           const isSpanningStrategy = strategy === 'spanning';
            const strategyNote = isSpanningStrategy
              ? `**关键生成策略 (Spanning)**: 请规划全书的 ${count} 个关键分卷节点 (Keyframes)。
                 - 第1卷：故事的开篇/起因。
                 - 中间卷：故事中期的重大转折/高潮。
                 - 最后一卷：故事的最终结局/大高潮。
                 - 这些分卷不需要连续，它们是支撑全书结构的骨架。`
-             : `**常规生成策略 (Linear)**: 请从上一个节点接续，生成紧随其后的 ${count} 个连续分卷。`;
+             : `**一次性连贯策略 (One-Pass)**: 请根据世界观，一次性推演接下来的 ${count} 个连续分卷。必须保证因果联系紧密。`;
 
            taskPrompt = `
              任务：【全书分卷规划】 (Volume Outline Generation)
@@ -757,16 +797,20 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
                 - **能力/体质**：本卷觉醒了什么特殊体质或修炼了什么核心神通，根据当前分卷的剧情设定来设计，并不是都要有。
            `;
       } 
-      // CASE 2: OUTLINE -> PLOT (UPDATED FOR REALM/COMBAT LOGIC + SPANNING MODE)
+      // CASE 2: OUTLINE -> PLOT (UPDATED FOR REALM/COMBAT LOGIC + SPANNING MODE + ONE_PASS)
       else if (currentNode.type === NodeType.OUTLINE) {
-           const isSpanningStrategy = milestoneConfig?.strategy === 'spanning';
+           const isSpanningStrategy = strategy === 'spanning';
+           const isOnePass = strategy === 'one_pass';
+           
            const strategyNote = isSpanningStrategy 
              ? `**关键生成策略 (Spanning)**: 请生成分布在【整个分卷时间线】上的 ${count} 个关键锚点 (Keyframes)。
                 - 第1个节点：分卷的开篇/起因。
                 - 中间节点：分卷中期的重大转折点/高潮前奏。
                 - 最后一个节点：分卷的最终结局/高潮结束。
                 - 这些节点**不需要**是连续的，它们是支撑起整个分卷骨架的柱子。`
-             : `**常规生成策略 (Linear)**: 请从上一个节点接续，生成紧随其后的 ${count} 个连续剧情点。`;
+             : (isOnePass 
+                ? `**一次性全量生成 (One-Pass)**: 请将整个分卷的内容，完整、连续地拆解为 ${count} 个具体的剧情点。所有点必须首尾相连，逻辑严密，无断层。`
+                : `**常规生成策略 (Linear)**: 请从上一个节点接续，生成紧随其后的 ${count} 个连续剧情点。`);
 
            taskPrompt = `
              任务：【分卷剧情拆解 (Volume Breakdown)】
@@ -781,6 +825,8 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
              目标：**基于分卷梗概**，将接下来的剧情拆解为 ${count} 个具体的“剧情事件点 (PLOT)”。
              ${strategyNote}
              
+             ${REALM_CONSTRAINT}
+
              **核心规则（重要 - 必须执行）：**
              1. **【战力与境界校验】(CRITICAL)**：
                 - 每个剧情点 summary 必须明确注明主角**当前的境界/等级** (例如：[练气三层] 或 [S级初期])。
@@ -815,6 +861,8 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
             
             目标：将上述【剧情详纲】中的事件，**无遗漏、无新增**地分配到接下来的 ${count} 个“章节 (CHAPTER)”中。
             
+            ${REALM_CONSTRAINT}
+
             **核心要求：**
             1. **【境界一致性】**：章节细纲必须严格遵守详纲中设定的主角境界。如果详纲提到“突破”，章节中必须包含突破过程。
             2. **总量守恒**：这 ${count} 章的所有事件加起来，必须严格等于【剧情详纲】的内容。
@@ -851,7 +899,7 @@ export const generateNodeExpansion = async (params: AIRequestParams): Promise<Pa
                 - 必须包含**波峰与波谷**：例如 [危机/战斗] -> [收获/修整] -> [新的悬念] -> [再次爆发]。确保情绪曲线有起伏。
            `;
       } else {
-           taskPrompt = `任务：【续写后续剧情】基于 ${currentNode.title} 的结局，推演下 ${count} 个逻辑紧密的剧情单元。`;
+           taskPrompt = `任务：【续写后续剧情】基于 ${currentNode.title} 的结局，推演下 ${count} 个逻辑紧密的剧情单元。 ${REALM_CONSTRAINT}`;
       }
   }
 
@@ -986,8 +1034,9 @@ export const refineContent = async (text: string, instruction: string, settings:
         **STRICT OUTPUT RULE:**
         1. You must ONLY return the rewritten content/story text.
         2. Do NOT output "Here is the revised text:", "Optimized version:", "Sure", or "Okay".
-        3. Do NOT wrap the output in markdown code blocks (e.g., \`\`\`markdown).
-        4. If the user asks to preserve content, ensure the output includes the preserved parts.
+        3. Do NOT output "Output JSON Format" or any JSON. Just the text.
+        4. Do NOT wrap the output in markdown code blocks (e.g., \`\`\`markdown).
+        5. If the user asks to preserve content, ensure the output includes the preserved parts.
     `;
     return await callOpenAI([
         { role: "system", content: settings.systemInstruction },

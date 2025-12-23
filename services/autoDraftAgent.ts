@@ -557,7 +557,7 @@ export class AutoDraftAgent {
                 this.log(`已启用智能情节设计 Agent (节奏: ${this.config.pacing || 'Normal'})`);
             }
             // Use targetDepth instead of outlineMode
-            this.log(`🔥 生成目标层级: ${this.config.targetDepth} (OUTLINE=分卷, PLOT=剧情, CHAPTER=细纲, PROSE=正文)`);
+            this.log(`🔥 生成目标层级: ${this.config.targetDepth} | 策略: ${this.config.generationStrategy === 'spanning' ? '关键帧插值' : '线性连贯(One-Pass)'}`);
             
             // --- PHASE 1: STRUCTURE & SKELETON (Breadth-First Validation) ---
             this.log("=== 阶段一：全书骨架铺设与校验 ===");
@@ -585,7 +585,14 @@ export class AutoDraftAgent {
             }
             
             const root = this.getNodes().find(n => n.id === rootNodeId);
-            const volumeIds = this.getNodes().filter(n => root?.childrenIds.includes(n.id) && n.type === NodeType.OUTLINE).map(n => n.id);
+            let volumeIds = this.getNodes().filter(n => root?.childrenIds.includes(n.id) && n.type === NodeType.OUTLINE).map(n => n.id);
+
+            // NEW: Filter by selected scope if provided
+            if (this.config.selectedVolumeIds && this.config.selectedVolumeIds.length > 0) {
+                const scope = this.config.selectedVolumeIds;
+                this.log(`>> [Scope] 仅处理选中的 ${scope.length} 个分卷...`);
+                volumeIds = volumeIds.filter(id => scope.includes(id));
+            }
 
             // 3. Process ALL Volumes (Structure Check + RESOURCE SYNC)
             this.log(`>> 正在优化 ${volumeIds.length} 个分卷大纲...`);
@@ -634,11 +641,12 @@ export class AutoDraftAgent {
                         targetPlotCount = advice.count;
                     }
 
-                    // Ensure Plots exist (UPGRADE: uses Keyframe Strategy if count >= 5)
+                    // Ensure Plots exist (Strategy applied inside ensureChildren)
                     const plotIds = await this.ensureChildren(volId, NodeType.PLOT, targetPlotCount, { volumeIndex: i + 1 });
                     
                     // DYNAMIC AGENT: Pacing Check (Gap Filling)
-                    if (this.config.enablePlotAnalysis) {
+                    // Only apply pacing gap fill if NOT using One-Pass (One-Pass is assumed coherent)
+                    if (this.config.enablePlotAnalysis && this.config.generationStrategy !== 'one_pass') {
                         await this.refinePlotSequence(plotIds, volId);
                     }
                     this.markNodeDone(volId, 'exp_children');
@@ -651,11 +659,14 @@ export class AutoDraftAgent {
                 const finalPlotIds = finalVolNode ? this.getNodes().filter(n => finalVolNode.childrenIds.includes(n.id) && n.type === NodeType.PLOT).map(n=>n.id) : [];
 
                 // Batch Validate + Global Chain Check (Moved inside function logic)
+                // UPDATED: Now supports Deletion
                 await this.batchCheckAndFix(finalPlotIds, volId);
 
                 // Individual Optimization + RESOURCE SYNC
                 for (const plotId of finalPlotIds) {
                     if (this.stopSignal) break;
+                    // Re-check existence as batchCheckAndFix might have deleted some
+                    if (!this.getNodes().some(n => n.id === plotId)) continue; 
 
                     await this.auditAncestry(plotId); 
                     await this.optimizeNode(plotId, 400);
@@ -818,11 +829,41 @@ export class AutoDraftAgent {
         const existing = this.getNodes().filter(n => parent.childrenIds.includes(n.id) && n.type === type);
         const createdIds = existing.map(n => n.id);
 
-        // UPGRADE: Special Strategy for PLOT Nodes (>=5) AND OUTLINE Nodes (>=3)
-        // Applies "Head & Tail" Strategy ONLY IF we are starting fresh (empty children).
-        // This prevents weirdness when appending to an existing list.
-        if (createdIds.length === 0 && ((type === NodeType.PLOT && totalTargetCount >= 5) || (type === NodeType.OUTLINE && totalTargetCount >= 3))) {
+        // --- STRATEGY SWITCHING ---
+        // 1. Spanning (Keyframes + Infill) -> Only if "spanning" selected AND fresh start
+        // 2. One-Pass (Continuous Batch) -> Only if "one_pass" selected AND fresh start AND type is PLOT
+        // 3. Linear Batch (Default) -> Append logic
+        
+        const isFreshStart = createdIds.length === 0;
+        const useSpanning = this.config.generationStrategy === 'spanning' && isFreshStart && ((type === NodeType.PLOT && totalTargetCount >= 5) || (type === NodeType.OUTLINE && totalTargetCount >= 3));
+        const useOnePass = this.config.generationStrategy === 'one_pass' && isFreshStart && type === NodeType.PLOT;
+
+        if (useSpanning) {
              return this.generateKeyframesAndFill(parentId, type, totalTargetCount, context);
+        }
+
+        // ONE-PASS MODE: Ask for ALL nodes at once with specific prompt
+        if (useOnePass) {
+            this.log(`[结构生成] 采用 "One-Pass" 策略，一次性生成 ${totalTargetCount} 个剧情点...`);
+            const nodesData = await generateNodeExpansion({
+                currentNode: parent,
+                parentContext: undefined,
+                prevContext: undefined,
+                globalContext: this.getFullContext(parent),
+                settings: this.settings,
+                task: 'EXPAND',
+                // Milestone config configured to ask for ALL with strategy 'one_pass'
+                milestoneConfig: { totalPoints: totalTargetCount, generateCount: totalTargetCount, strategy: 'one_pass' },
+                structuralContext: context
+            });
+            
+            if (nodesData.length > 0) {
+                 const ids = this.addNodesToState(parentId, nodesData);
+                 await this.waitForNodes(ids);
+                 createdIds.push(...ids);
+                 return createdIds;
+            }
+            // If failed, fall through to linear loop
         }
 
         while(createdIds.length < totalTargetCount && !this.stopSignal) {
@@ -837,7 +878,7 @@ export class AutoDraftAgent {
             const milestoneConfig: MilestoneConfig | undefined = (type === NodeType.OUTLINE || type === NodeType.PLOT) ? { 
                 totalPoints: totalTargetCount, 
                 generateCount: count,
-                strategy: 'linear' 
+                strategy: 'linear_batch' 
             } : undefined;
             const expansionConfig = type === NodeType.CHAPTER ? { chapterCount: count, wordCount: `${this.config.wordCountPerChapter}` } : undefined;
 
@@ -942,7 +983,7 @@ export class AutoDraftAgent {
                         globalContext: this.getFullContext(parent),
                         settings: this.settings,
                         task: 'CONTINUE', // Use CONTINUE for Infill
-                        milestoneConfig: { totalPoints: countForThisGap, generateCount: countForThisGap, strategy: 'linear' },
+                        milestoneConfig: { totalPoints: countForThisGap, generateCount: countForThisGap, strategy: 'linear_batch' },
                         structuralContext: context
                     });
                     
@@ -976,7 +1017,7 @@ export class AutoDraftAgent {
                 globalContext: this.getFullContext(parent),
                 settings: this.settings,
                 task: 'CONTINUE', // Continue from last
-                milestoneConfig: { totalPoints: remaining, generateCount: remaining, strategy: 'linear' },
+                milestoneConfig: { totalPoints: remaining, generateCount: remaining, strategy: 'linear_batch' },
                 structuralContext: context
             });
             
@@ -1057,6 +1098,7 @@ export class AutoDraftAgent {
         this.markNodeDone(chapterId, 'val_end');
     }
 
+    // --- UPDATED: BATCH CHECK WITH DELETE HANDLING ---
     private async batchCheckAndFix(nodeIds: string[], parentId: string) {
         if (nodeIds.length < 2) return;
         
@@ -1065,14 +1107,19 @@ export class AutoDraftAgent {
         
         for (let i = 0; i < nodeIds.length; i += BATCH_SIZE) {
             if (this.stopSignal) break;
-            const batchIds = nodeIds.slice(i, i + BATCH_SIZE);
+            
+            // Refresh nodeIds to handle potential deletions from previous batches
+            const currentNodes = this.getNodes().filter(n => nodeIds.includes(n.id));
+            if (currentNodes.length === 0) continue;
+
+            const batchIds = nodeIds.slice(i, i + BATCH_SIZE).filter(id => this.getNodes().some(n => n.id === id));
+            if (batchIds.length === 0) continue;
             
             // CONTEXT OVERLAP: Get last 2 nodes from previous batch as read-only context
             const prevContextIds = i >= 2 ? nodeIds.slice(i - 2, i) : [];
             const prevContextNodes = this.getNodes().filter(n => prevContextIds.includes(n.id));
 
             // Phase 1: Standard Individual/Pairwise check (Logic)
-            // Should we skip if all nodes in batch are "val_struct"?
             if (this.isNodeDone(batchIds[batchIds.length-1], 'val_struct')) continue;
             
             const allExist = await this.waitForNodes(batchIds, 5000);
@@ -1092,9 +1139,24 @@ export class AutoDraftAgent {
                 const result = await batchValidateNodes(nodesToCheck, parent, prevContextNodes, this.getFullContext(parent), this.settings);
 
                 if (result.hasConflicts && result.fixes.length > 0) {
-                    this.log(`[逻辑修复] 发现 ${result.fixes.length} 个问题，正在修正...`);
+                    this.log(`[逻辑修复] 发现 ${result.fixes.length} 个建议。`);
                     for (const fix of result.fixes) {
                         if (this.stopSignal) break;
+                        
+                        // NEW: HANDLE DELETE
+                        if (fix.delete) {
+                            const targetNode = this.getNodes().find(n => n.id === fix.id);
+                            if (targetNode) {
+                                this.log(`[节点裁撤] 删除无用节点: ${targetNode.title}`);
+                                this.deleteNode(fix.id);
+                                
+                                // Remove from batchIds immediately so we don't process it further or mark it done
+                                const idx = batchIds.indexOf(fix.id);
+                                if (idx > -1) batchIds.splice(idx, 1);
+                            }
+                            continue;
+                        }
+
                         const node = this.getNodes().find(n => n.id === fix.id);
                         if (node) {
                             // Fix now returns { title, summary }
@@ -1127,7 +1189,7 @@ export class AutoDraftAgent {
         // Phase 2: GLOBAL SEQUENCE CHECK (After ALL batches are done for this parent)
         // This is now OUTSIDE the loop, running once for the entire sequence.
         const parent = this.getNodes().find(n => n.id === parentId);
-        const allChildren = this.getNodes().filter(n => nodeIds.includes(n.id));
+        const allChildren = this.getNodes().filter(n => nodeIds.includes(n.id)); // Should exclude deleted ones naturally by getNodes()
         
         if (parent && allChildren.length > 3) {
             this.log(`[全局审计] 正在对分卷 "${parent.title}" 的所有剧情点进行最终断层检查...`);
@@ -1159,6 +1221,32 @@ export class AutoDraftAgent {
                 this.log(`[全局审计] 剧情链完整无断层。`);
             }
         }
+    }
+    
+    // NEW: Helper for deletion
+    private deleteNode(id: string) {
+        this.setNodes(prev => {
+            const nodeToDelete = prev.find(n => n.id === id);
+            const prevNodeId = nodeToDelete?.prevNodeId;
+            const nextNode = prev.find(n => n.prevNodeId === id);
+            const remaining = prev.filter(n => n.id !== id);
+            
+            // Re-link
+            return remaining.map(n => {
+                let newNode = { ...n };
+                // Remove from parent childrenIds
+                if (newNode.childrenIds.includes(id)) {
+                    newNode.childrenIds = newNode.childrenIds.filter(cid => cid !== id);
+                }
+                // Fix linked list
+                if (n.id === nextNode?.id && prevNodeId) {
+                    newNode.prevNodeId = prevNodeId;
+                } else if (n.id === nextNode?.id) {
+                    newNode.prevNodeId = null;
+                }
+                return newNode;
+            });
+        });
     }
 
     private addNodesToState(parentId: string, newNodesData: Partial<NodeData>[], afterNodeId?: string): string[] {
